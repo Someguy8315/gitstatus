@@ -12,7 +12,12 @@
 > ```
 >
 > `deps/libgit2` is [romkatv/libgit2](https://github.com/romkatv/libgit2) at the tag in
-> `build.info`, with Windows build fixes. Other platforms still use `./build`.
+> `build.info`, with Windows build fixes. Indexes with an omitted checksum (`index.skipHash`,
+> also enabled by `feature.manyFiles`) are reread on each daemon query so rebases and other
+> index replacements cannot leave stale status. Other platforms still use `./build`.
+>
+> After building, run `python tests/test_index.py` to check a persistent daemon across rebases
+> with and without index checksums and `--reset-author-date`.
 
 - **THE PROJECT HAS VERY LIMITED SUPPORT**
 - **NO NEW FEATURES ARE IN THE WORKS**

@@ -640,7 +640,9 @@ static int compare_checksum(git_index *index)
 	if (bytes_read < 0)
 		return -1;
 
-	return !!git_oid_cmp(&checksum, &index->checksum);
+	/* index.skipHash (also enabled by feature.manyFiles) writes a zero checksum.
+	 * It cannot prove the index is unchanged, so reload it on every query. */
+	return git_oid_iszero(&checksum) || !!git_oid_cmp(&checksum, &index->checksum);
 }
 
 int git_index_read(git_index *index, int force)
