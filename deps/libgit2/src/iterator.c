@@ -1446,6 +1446,7 @@ static int filesystem_iterator_frame_push(
 		 * we have an index, we can just copy the data out of it.
 		 */
 
+    submodule = false;
     if (statbuf.st_mode == 0 &&
         diriter.d_type == DT_DIR &&
         !(error = filesystem_iterator_is_submodule(&submodule, iter, path, path_len)) &&
@@ -1454,18 +1455,21 @@ static int filesystem_iterator_frame_push(
       statbuf.st_mode = S_IFDIR;
     } else if (error < 0) {
       goto done;
-    } else if (statbuf.st_mode == 0) {
-      if ((error = git_path_diriter_stat(&statbuf, &diriter)) < 0) {
-        /* file was removed between readdir and lstat */
-        if (error == GIT_ENOTFOUND) continue;
+    } else {
+      // filesystem_iterator_examine_path may have already stat'ed the path.
+      if (statbuf.st_mode == 0) {
+        if ((error = git_path_diriter_stat(&statbuf, &diriter)) < 0) {
+          /* file was removed between readdir and lstat */
+          if (error == GIT_ENOTFOUND) continue;
 
-        /* treat the file as unreadable */
-        memset(&statbuf, 0, sizeof(statbuf));
-        statbuf.st_mode = GIT_FILEMODE_UNREADABLE;
+          /* treat the file as unreadable */
+          memset(&statbuf, 0, sizeof(statbuf));
+          statbuf.st_mode = GIT_FILEMODE_UNREADABLE;
 
-        error = 0;
+          error = 0;
+        }
+        iter->base.stat_calls++;
       }
-      iter->base.stat_calls++;
 
       /* Ignore wacky things in the filesystem */
       if (!S_ISDIR(statbuf.st_mode) && !S_ISREG(statbuf.st_mode) && !S_ISLNK(statbuf.st_mode) &&
