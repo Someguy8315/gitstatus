@@ -21,9 +21,39 @@
 #include <cstddef>
 #include <vector>
 
+#ifdef _WIN32
+#include <string>
+
+#include "stat.h"
+#include "string_view.h"
+#endif
+
 #include "arena.h"
 
 namespace gitstatus {
+
+#ifdef _WIN32
+
+// Appends the UTF-8 path to out as UTF-16, converting '/' to '\'.
+void AppendWidePath(std::wstring& out, StringView path);
+
+// Returns the absolute UTF-8 path (drive or UNC; either separator) as an extended-length
+// "\\?\" path, which is not limited to MAX_PATH.
+std::wstring WidePath(const char* path);
+
+// The Windows counterpart of the POSIX ListDir below. dir must be a WidePath() ending with '\'.
+// Every entry additionally carries its Stat (see EntryStat()) because a single directory query
+// returns names and metadata together, which spares a separate stat for each file.
+bool ListDir(const std::wstring& dir, Arena& arena, std::vector<char*>& entries,
+             bool case_sensitive);
+
+// Returns the Stat of an entry produced by ListDir().
+const Stat& EntryStat(const char* entry);
+
+// Like lstat(), except that a symlink reports as the regular file or directory it is marked as.
+bool LStat(const char* path, Stat& st);
+
+#else
 
 // On error, leaves entries unchanged and returns false. Does not throw.
 //
@@ -44,6 +74,8 @@ namespace gitstatus {
 // For best results, reuse the arena and vector for multiple calls to avoid heap allocations.
 bool ListDir(int dir_fd, Arena& arena, std::vector<char*>& entries, bool precompose_unicode,
              bool case_sensitive);
+
+#endif  // _WIN32
 
 }  // namespace gitstatus
 

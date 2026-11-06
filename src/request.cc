@@ -17,11 +17,19 @@
 
 #include "request.h"
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+
+#include <chrono>
+#include <thread>
+#else
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/select.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdlib>
@@ -49,6 +57,9 @@ Request ParseRequest(const std::string& s) {
   }
   sep = std::find(begin, end, kFieldSep);
   res.dir.assign(begin, sep);
+#ifdef _WIN32
+  std::replace(res.dir.begin(), res.dir.end(), '\\', '/');
+#endif
   if (sep == end) return res;
 
   begin = sep + 1;
@@ -57,6 +68,7 @@ Request ParseRequest(const std::string& s) {
   return res;
 }
 
+#ifndef _WIN32
 bool IsLockedFd(int fd) {
   CHECK(fd >= 0);
   struct flock flock = {};
@@ -64,6 +76,19 @@ bool IsLockedFd(int fd) {
   flock.l_whence = SEEK_SET;
   CHECK(fcntl(fd, F_GETLK, &flock) != -1) << Errno();
   return flock.l_type != F_UNLCK;
+}
+#endif
+
+bool IsAlive(int pid) {
+#ifdef _WIN32
+  HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+  if (!h) return false;
+  DWORD res = WaitForSingleObject(h, 0);
+  CHECK(CloseHandle(h)) << GetLastError();
+  return res == WAIT_TIMEOUT;
+#else
+  return !kill(pid, 0);
+#endif
 }
 
 }  // namespace
@@ -78,6 +103,46 @@ std::ostream& operator<<(std::ostream& strm, const Request& req) {
 RequestReader::RequestReader(int fd, int lock_fd, int parent_pid)
     : fd_(fd), lock_fd_(lock_fd), parent_pid_(parent_pid) {
   CHECK(fd != lock_fd);
+#ifdef _WIN32
+  CHECK(lock_fd < 0);
+  HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+  std::thread([this, h] {
+    char buf[4096];
+    DWORD n;
+    while (ReadFile(h, buf, sizeof(buf), &n, nullptr) && n) {
+      std::unique_lock<std::mutex> lock(mutex_);
+      input_.append(buf, n);
+      cv_.notify_one();
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    eof_ = true;
+    cv_.notify_one();
+  }).detach();
+#endif
+}
+
+int RequestReader::Read(char* buf, int size) {
+#ifdef _WIN32
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (!cv_.wait_for(lock, std::chrono::seconds(1), [&] { return eof_ || !input_.empty(); })) {
+    return -1;
+  }
+  int n = std::min(size, static_cast<int>(input_.size()));
+  input_.copy(buf, n);
+  input_.erase(0, n);
+  return n;
+#else
+  fd_set fds;
+  FD_ZERO(&fds);
+  FD_SET(fd_, &fds);
+  struct timeval timeout = {.tv_sec = 1};
+
+  int n;
+  CHECK((n = select(fd_ + 1, &fds, NULL, NULL, &timeout)) >= 0) << Errno();
+  if (n == 0) return -1;
+  CHECK((n = read(fd_, buf, size)) >= 0) << Errno();
+  return n;
+#endif
 }
 
 bool RequestReader::ReadRequest(Request& req) {
@@ -91,27 +156,22 @@ bool RequestReader::ReadRequest(Request& req) {
 
   char buf[256];
   while (true) {
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(fd_, &fds);
-    struct timeval timeout = {.tv_sec = 1};
-
-    int n;
-    CHECK((n = select(fd_ + 1, &fds, NULL, NULL, &timeout)) >= 0) << Errno();
-    if (n == 0) {
+    int n = Read(buf, sizeof(buf));
+    if (n < 0) {
+#ifndef _WIN32
       if (lock_fd_ >= 0 && !IsLockedFd(lock_fd_)) {
         LOG(INFO) << "Lock on fd " << lock_fd_ << " is gone. Exiting.";
         std::exit(0);
       }
-      if (parent_pid_ >= 0 && kill(parent_pid_, 0)) {
-        LOG(INFO) << "Unable to send signal 0 to " << parent_pid_ << ". Exiting.";
+#endif
+      if (parent_pid_ >= 0 && !IsAlive(parent_pid_)) {
+        LOG(INFO) << "Parent process " << parent_pid_ << " is gone. Exiting.";
         std::exit(0);
       }
       req = {};
       return false;
     }
 
-    CHECK((n = read(fd_, buf, sizeof(buf))) >= 0) << Errno();
     if (n == 0) {
       LOG(INFO) << "EOF. Exiting.";
       std::exit(0);

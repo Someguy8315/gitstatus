@@ -23,10 +23,14 @@
 #include <sstream>
 #include <utility>
 
+#ifdef _WIN32
+#include "dir.h"
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include "arena.h"
 #include "check.h"
@@ -77,14 +81,23 @@ std::string RepoState(git_repository* repo) {
   };
 
   auto DirExists = [&](StringView name) {
+#ifdef _WIN32
+    Stat st;
+    return LStat(arena.StrCat(gitdir, "/", name), st) && S_ISDIR(st.st_mode);
+#else
     int fd = open(arena.StrCat(gitdir, "/", name), O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) return false;
     CHECK(!close(fd)) << Errno();
     return true;
+#endif
   };
 
   auto ReadFile = [&](StringView name) {
+#ifdef _WIN32
+    std::ifstream strm(WidePath(arena.StrCat(gitdir, "/", name)));
+#else
     std::ifstream strm(arena.StrCat(gitdir, "/", name));
+#endif
     std::string res;
     strm >> res;
     return res;

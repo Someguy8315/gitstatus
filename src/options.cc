@@ -17,9 +17,11 @@
 
 #include "options.h"
 
+#ifndef _WIN32
 #include <fnmatch.h>
 #include <getopt.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <climits>
@@ -32,6 +34,87 @@
 namespace gitstatus {
 
 namespace {
+
+#ifdef _WIN32
+
+// Minimal replacements for the POSIX functions below.
+
+#define FNM_NOMATCH 1
+
+// Supports only '*' and '?'.
+int fnmatch(const char* pattern, const char* s, int flags) {
+  if (*pattern == '*') {
+    return !fnmatch(pattern + 1, s, flags) || (*s && !fnmatch(pattern, s + 1, flags)) ? 0
+                                                                                      : FNM_NOMATCH;
+  }
+  if (!*pattern) return *s ? FNM_NOMATCH : 0;
+  return *s && (*pattern == '?' || *pattern == *s) ? fnmatch(pattern + 1, s + 1, flags)
+                                                   : FNM_NOMATCH;
+}
+
+enum { no_argument, required_argument };
+
+struct option {
+  const char* name;
+  int has_arg;
+  int* flag;
+  int val;
+};
+
+char* optarg;
+int optind = 1;
+
+// Supports "-x value", "-xvalue", clustered flags such as "-UWD", "--name value" and
+// "--name=value". Stops at the first non-option argument or after "--".
+int getopt_long(int argc, char** argv, const char* shortopts, const option* longopts, int*) {
+  static const char* cluster = "";
+  optarg = nullptr;
+  if (!*cluster) {
+    if (optind >= argc || argv[optind][0] != '-' || !argv[optind][1]) return -1;
+    char* arg = argv[optind++];
+    if (arg[1] != '-') {
+      cluster = arg + 1;
+    } else if (!arg[2]) {
+      return -1;
+    } else {
+      const char* name = arg + 2;
+      const char* eq = std::strchr(name, '=');
+      size_t len = eq ? eq - name : std::strlen(name);
+      for (const option* o = longopts; o->name; ++o) {
+        if (std::strlen(o->name) != len || std::memcmp(o->name, name, len)) continue;
+        if (o->has_arg == no_argument) {
+          if (!eq) return o->val;
+        } else if (eq) {
+          optarg = const_cast<char*>(eq + 1);
+          return o->val;
+        } else if (optind < argc) {
+          optarg = argv[optind++];
+          return o->val;
+        }
+        break;
+      }
+      std::cerr << "gitstatusd: invalid option: " << arg << std::endl;
+      return '?';
+    }
+  }
+  char c = *cluster++;
+  const char* spec = c == ':' ? nullptr : std::strchr(shortopts, c);
+  if (spec && spec[1] == ':') {
+    if (*cluster) {
+      optarg = const_cast<char*>(cluster);
+    } else if (optind < argc) {
+      optarg = argv[optind++];
+    } else {
+      spec = nullptr;
+    }
+    cluster = "";
+  }
+  if (spec) return c;
+  std::cerr << "gitstatusd: invalid option: -" << c << std::endl;
+  return '?';
+}
+
+#endif  // _WIN32
 
 long ParseLong(const char* s) {
   errno = 0;

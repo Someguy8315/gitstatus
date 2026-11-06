@@ -1,5 +1,19 @@
 # gitstatus
 
+> **This fork** adds a native Windows build of gitstatusd for
+> [oh-my-posh](https://github.com/JanDeDobbeleer/oh-my-posh). It speaks the same protocol but takes
+> and returns Windows paths (`C:/x`, `//server/share/x`) instead of MSYS ones and needs no MSYS
+> runtime. It doesn't use the untracked cache: one directory query returns the metadata of every
+> file. Build it from a shell with clang-cl, CMake and Ninja on `PATH`:
+>
+> ```powershell
+> cmake -G Ninja -B obj -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_MT=llvm-mt
+> cmake --build obj
+> ```
+>
+> `deps/libgit2` is [romkatv/libgit2](https://github.com/romkatv/libgit2) at the tag in
+> `build.info`, with Windows build fixes. Other platforms still use `./build`.
+
 - **THE PROJECT HAS VERY LIMITED SUPPORT**
 - **NO NEW FEATURES ARE IN THE WORKS**
 - **MOST BUGS WILL GO UNFIXED**

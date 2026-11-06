@@ -17,9 +17,15 @@
 
 #include "timer.h"
 
+#ifdef _WIN32
+#include <windows.h>
+
+#include <chrono>
+#else
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <time.h>
+#endif
 
 #include <cmath>
 #include <limits>
@@ -30,6 +36,26 @@
 namespace gitstatus {
 
 namespace {
+
+#ifdef _WIN32
+
+double CpuTimeMs() {
+  // FILETIME counts 100ns intervals.
+  auto ToMs = [](const FILETIME& t) {
+    return 1e-4 * (uint64_t{t.dwHighDateTime} << 32 | t.dwLowDateTime);
+  };
+  FILETIME creation, exit, kernel, user;
+  CHECK(GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user)) << GetLastError();
+  return ToMs(user) + ToMs(kernel);
+}
+
+double WallTimeMs() {
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+#else
 
 double CpuTimeMs() {
   auto ToMs = [](const timeval& tv) { return 1e3 * tv.tv_sec + 1e-3 * tv.tv_usec; };
@@ -50,6 +76,8 @@ double WallTimeMs() {
   return 1e3 * ts.tv_sec + 1e-6 * ts.tv_nsec;
 #endif
 }
+
+#endif  // _WIN32
 
 }  // namespace
 

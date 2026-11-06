@@ -18,8 +18,6 @@
 #ifndef ROMKATV_GITSTATUS_INDEX_H_
 #define ROMKATV_GITSTATUS_INDEX_H_
 
-#include <sys/stat.h>
-
 #include <git2.h>
 
 #include <cstddef>
@@ -28,6 +26,7 @@
 
 #include "arena.h"
 #include "options.h"
+#include "stat.h"
 #include "string_view.h"
 #include "tribool.h"
 
@@ -53,7 +52,7 @@ struct IndexDir {
   StringView path;
   StringView basename;
   size_t depth = 0;
-  struct stat st = {};
+  Stat st = {};
   WithArena<std::vector<const git_index_entry*>> files;
   WithArena<std::vector<StringView>> subdirs;
 

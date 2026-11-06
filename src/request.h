@@ -22,6 +22,11 @@
 #include <ostream>
 #include <string>
 
+#ifdef _WIN32
+#include <condition_variable>
+#include <mutex>
+#endif
+
 namespace gitstatus {
 
 struct Request {
@@ -39,10 +44,21 @@ class RequestReader {
   bool ReadRequest(Request& req);
 
  private:
+  // Reads up to size bytes into buf. Returns -1 if no data arrives for a second, 0 on EOF.
+  int Read(char* buf, int size);
+
   int fd_;
   int lock_fd_;
   int parent_pid_;
   std::deque<char> read_;
+
+#ifdef _WIN32
+  // Windows cannot wait for an anonymous pipe with a timeout, so a thread reads it into input_.
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::string input_;
+  bool eof_ = false;
+#endif
 };
 
 }  // namespace gitstatus

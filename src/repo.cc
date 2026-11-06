@@ -17,10 +17,12 @@
 
 #include "repo.h"
 
+#ifndef _WIN32
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -102,6 +104,10 @@ bool Repo::Shard::Contains(Str<> str, StringView path) const {
 }
 
 Repo::Repo(git_repository* repo, Limits lim) : lim_(std::move(lim)), repo_(repo), tag_db_(repo) {
+#ifdef _WIN32
+  // ScanDirs() doesn't use the untracked cache on Windows.
+  untracked_cache_ = Tribool::kFalse;
+#else
   if (lim_.max_num_untracked) {
     GlobalThreadPool()->Schedule([this] {
       bool check = CheckDirMtime(git_repository_path(repo_));
@@ -113,6 +119,7 @@ Repo::Repo(git_repository* repo, Limits lim) : lim_(std::move(lim)), repo_(repo)
   } else {
     untracked_cache_ = Tribool::kFalse;
   }
+#endif
 }
 
 Repo::~Repo() {

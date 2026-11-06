@@ -17,10 +17,14 @@
 
 #include "tag_db.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdlib>
@@ -152,13 +156,18 @@ void TagDb::ReadLooseTags() {
   loose_arena_.Reuse();
 
   std::string dirname = git_repository_path(repo_) + "refs/tags"s;
+  // TODO: recursively traverse directories so that the file refs/tags/foo/bar gets interpreted
+  // as the tag foo/bar. See https://github.com/romkatv/gitstatus/issues/254.
+#ifdef _WIN32
+  (void)ListDir(WidePath(dirname.c_str()) + L'\\', loose_arena_, loose_tags_,
+                /* case_sensitive = */ true);
+#else
   int dir_fd = open(dirname.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (dir_fd < 0) return;
   ON_SCOPE_EXIT(&) { CHECK(!close(dir_fd)) << Errno(); };
-  // TODO: recursively traverse directories so that the file refs/tags/foo/bar gets interpreted
-  // as the tag foo/bar. See https://github.com/romkatv/gitstatus/issues/254.
   (void)ListDir(dir_fd, loose_arena_, loose_tags_, /* precompose_unicode = */ false,
                 /* case_sensitive = */ true);
+#endif
 }
 
 void TagDb::UpdatePack() {
@@ -176,8 +185,12 @@ void TagDb::UpdatePack() {
   };
 
   std::string pack_path = git_repository_path(repo_) + "packed-refs"s;
-  struct stat st;
+  Stat st;
+#ifdef _WIN32
+  if (!LStat(pack_path.c_str(), st)) {
+#else
   if (stat(pack_path.c_str(), &st)) {
+#endif
     Reset();
     return;
   }
@@ -188,6 +201,19 @@ void TagDb::UpdatePack() {
   try {
     while (true) {
       LOG(INFO) << "Parsing " << Print(pack_path);
+#ifdef _WIN32
+      // FILE_SHARE_DELETE lets git replace packed-refs while we read it.
+      HANDLE h = CreateFileW(WidePath(pack_path.c_str()).c_str(), GENERIC_READ,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      VERIFY(h != INVALID_HANDLE_VALUE) << GetLastError();
+      ON_SCOPE_EXIT(&) { CHECK(CloseHandle(h)) << GetLastError(); };
+      pack_.resize(st.st_size + 1);
+      DWORD n;
+      VERIFY(ReadFile(h, &pack_[0], static_cast<DWORD>(st.st_size + 1), &n, nullptr))
+          << GetLastError();
+      VERIFY(LStat(pack_path.c_str(), pack_stat_));
+#else
       int fd = open(pack_path.c_str(), O_RDONLY | O_CLOEXEC);
       VERIFY(fd >= 0);
       ON_SCOPE_EXIT(&) { CHECK(!close(fd)) << Errno(); };
@@ -195,6 +221,7 @@ void TagDb::UpdatePack() {
       ssize_t n = read(fd, &pack_[0], st.st_size + 1);
       VERIFY(n >= 0) << Errno();
       VERIFY(!fstat(fd, &pack_stat_)) << Errno();
+#endif
       if (!StatEq(st, pack_stat_)) {
         st = pack_stat_;
         continue;

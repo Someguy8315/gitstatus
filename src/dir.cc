@@ -22,12 +22,16 @@
 #include <cerrno>
 #include <cstring>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #ifdef __linux__
 #include <endian.h>
@@ -48,7 +52,8 @@ namespace gitstatus {
 
 namespace {
 
-bool Dots(const char* name) {
+template <class Char>
+bool Dots(const Char* name) {
   if (name[0] == '.') {
     if (name[1] == 0) return true;
     if (name[1] == '.' && name[2] == 0) return true;
@@ -58,8 +63,101 @@ bool Dots(const char* name) {
 
 }  // namespace
 
+#ifdef _WIN32
+
+namespace {
+
+Stat ToStat(DWORD attrs, DWORD reparse_tag, FILETIME mtime, DWORD size_high, DWORD size_low) {
+  // FILETIME counts 100ns intervals since 1601. Git for Windows converts it the same way.
+  int64_t t = (int64_t{mtime.dwHighDateTime} << 32 | mtime.dwLowDateTime) - 116444736000000000;
+  Stat st = {};
+  st.st_mtim.tv_sec = t / 10000000;
+  st.st_mtim.tv_nsec = t % 10000000 * 100;
+  st.st_size = int64_t{size_high} << 32 | size_low;
+  if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) && reparse_tag == IO_REPARSE_TAG_SYMLINK) {
+    st.st_mode = S_IFLNK;
+  } else if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+    st.st_mode = S_IFDIR;
+  } else {
+    st.st_mode = S_IFREG | 0644;
+  }
+  return st;
+}
+
+}  // namespace
+
+void AppendWidePath(std::wstring& out, StringView path) {
+  if (!path.len) return;
+  int n = MultiByteToWideChar(CP_UTF8, 0, path.ptr, static_cast<int>(path.len), nullptr, 0);
+  CHECK(n > 0) << GetLastError();
+  size_t pos = out.size();
+  out.resize(pos + n);
+  MultiByteToWideChar(CP_UTF8, 0, path.ptr, static_cast<int>(path.len), &out[pos], n);
+  std::replace(out.begin() + pos, out.end(), L'/', L'\\');
+  // "\\?\" paths are not normalized, so an empty path component would not resolve.
+  auto Seps = [](wchar_t a, wchar_t b) { return a == L'\\' && b == L'\\'; };
+  out.erase(std::unique(out.begin() + (pos ? pos - 1 : 0), out.end(), Seps), out.end());
+}
+
+std::wstring WidePath(const char* path) {
+  std::wstring res = L"\\\\?\\";
+  if ((path[0] == '/' || path[0] == '\\') && (path[1] == '/' || path[1] == '\\')) {
+    // //server/share becomes \\?\UNC\server\share.
+    res += L"UNC";
+    ++path;
+  }
+  AppendWidePath(res, StringView(path));
+  return res;
+}
+
+bool ListDir(const std::wstring& dir, Arena& arena, std::vector<char*>& entries,
+             bool case_sensitive) {
+  const size_t orig_size = entries.size();
+  WIN32_FIND_DATAW data;
+  HANDLE h = FindFirstFileExW((dir + L'*').c_str(), FindExInfoBasic, &data, FindExSearchNameMatch,
+                              nullptr, FIND_FIRST_EX_LARGE_FETCH);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  ON_SCOPE_EXIT(&) { CHECK(FindClose(h)) << GetLastError(); };
+
+  do {
+    if (Dots(data.cFileName)) continue;
+    int wlen = static_cast<int>(std::wcslen(data.cFileName));
+    // Each UTF-16 code unit becomes at most 3 bytes of UTF-8.
+    int cap = 3 * wlen;
+    char* p = static_cast<char*>(arena.Allocate(sizeof(Stat) + 1 + cap + 1, alignof(Stat)));
+    Stat st = ToStat(data.dwFileAttributes, data.dwReserved0, data.ftLastWriteTime,
+                     data.nFileSizeHigh, data.nFileSizeLow);
+    std::memcpy(p, &st, sizeof(st));
+    char* name = p + sizeof(Stat) + 1;
+    int n = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, wlen, name, cap, nullptr, nullptr);
+    CHECK(n > 0) << GetLastError();
+    name[n] = 0;
+    name[-1] = S_ISDIR(st.st_mode) ? DT_DIR : S_ISLNK(st.st_mode) ? DT_LNK : DT_REG;
+    entries.push_back(name);
+  } while (FindNextFileW(h, &data));
+
+  if (GetLastError() != ERROR_NO_MORE_FILES) {
+    entries.resize(orig_size);
+    return false;
+  }
+  StrSort(entries.data() + orig_size, entries.data() + entries.size(), case_sensitive);
+  return true;
+}
+
+const Stat& EntryStat(const char* entry) {
+  return *reinterpret_cast<const Stat*>(entry - 1 - sizeof(Stat));
+}
+
+bool LStat(const char* path, Stat& st) {
+  WIN32_FILE_ATTRIBUTE_DATA data;
+  if (!GetFileAttributesExW(WidePath(path).c_str(), GetFileExInfoStandard, &data)) return false;
+  st =
+      ToStat(data.dwFileAttributes, 0, data.ftLastWriteTime, data.nFileSizeHigh, data.nFileSizeLow);
+  return true;
+}
+
 // The linux-specific implementation is about 20% faster than the generic (posix) implementation.
-#ifdef __linux__
+#elif defined(__linux__)
 
 uint64_t Read64(const void* p) {
   uint64_t res;

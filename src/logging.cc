@@ -17,7 +17,11 @@
 
 #include "logging.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <pthread.h>
+#endif
 #include <time.h>
 
 #include <cerrno>
@@ -39,7 +43,11 @@ constexpr char kHexLower[] = {'0', '1', '2', '3', '4', '5', '6', '7',
                               '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
 
 void FormatThreadId(char (&out)[2 * sizeof(std::uintptr_t) + 1]) {
+#ifdef _WIN32
+  std::uintptr_t tid = GetCurrentThreadId();
+#else
   std::uintptr_t tid = (std::uintptr_t)pthread_self();
+#endif
   char* p = out + sizeof(out) - 1;
   *p = 0;
   do {
@@ -52,7 +60,11 @@ void FormatThreadId(char (&out)[2 * sizeof(std::uintptr_t) + 1]) {
 void FormatCurrentTime(char (&out)[64]) {
   std::time_t time = std::time(nullptr);
   struct tm tm;
+#ifdef _WIN32
+  if (localtime_s(&tm, &time) || std::strftime(out, sizeof(out), "%F %T", &tm) == 0) {
+#else
   if (localtime_r(&time, &tm) != &tm || std::strftime(out, sizeof(out), "%F %T", &tm) == 0) {
+#endif
     std::strcpy(out, "undef");
   }
 }
@@ -82,6 +94,9 @@ void LogStreamBase::Flush() {
 std::ostream& operator<<(std::ostream& strm, Errno e) {
   // GNU C Library uses a buffer of 1024 characters for strerror(). Mimic to avoid truncations.
   char buf[1024];
+#ifdef _WIN32
+  strm << (strerror_s(buf, sizeof(buf), e.err) ? "unknown error" : buf);
+#else
   auto x = strerror_r(e.err, buf, sizeof(buf));
   // There are two versions of strerror_r with different semantics. We can figure out which
   // one we've got by looking at the result type.
@@ -95,6 +110,7 @@ std::ostream& operator<<(std::ostream& strm, Errno e) {
     // Something else entirely.
     strm << "unknown error";
   }
+#endif
   return strm;
 }
 
