@@ -7,10 +7,12 @@
 
 #include "iterator.h"
 
+#ifndef GIT_WIN32
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include "tree.h"
 #include "index.h"

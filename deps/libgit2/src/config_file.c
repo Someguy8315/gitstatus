@@ -337,7 +337,8 @@ static int config_file_get(git_config_backend *cfg, const char *key, git_config_
 	}
 
   __atomic_store(&entry->free, &free, __ATOMIC_RELAXED);
-  __atomic_store(&entry->payload, &entries, __ATOMIC_RELAXED);
+  void *payload = entries;
+  __atomic_store(&entry->payload, &payload, __ATOMIC_RELAXED);
 	*out = entry;
 
 	return 0;

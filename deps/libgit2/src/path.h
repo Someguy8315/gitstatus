@@ -479,7 +479,13 @@ struct git_path_diriter
 
 	WIN32_FIND_DATAW current;
 	unsigned int needs_next;
+
+	/* Always DT_UNKNOWN: git_path_diriter_stat is free here (it reads the find data). */
+	unsigned char d_type;
 };
+
+#define DT_UNKNOWN 0
+#define DT_DIR 4
 
 #define GIT_PATH_DIRITER_INIT { {0}, 0, GIT_BUF_INIT, 0, INVALID_HANDLE_VALUE }
 

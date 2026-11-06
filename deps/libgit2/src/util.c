@@ -743,7 +743,12 @@ void git__qsort_r(
 	qsort_r(els, nel, elsize, cmp, payload);
 #elif defined(HAVE_QSORT_S)
 	git__qsort_r_glue glue = { cmp, payload };
+#ifdef _MSC_VER
+	/* Unlike C11, MSVC passes the context first. */
+	qsort_s(els, nel, elsize, git__qsort_r_glue_cmp, &glue);
+#else
 	qsort_s(els, nel, elsize, git__qsort_s_glue_cmp, &glue);
+#endif
 #else
 	insertsort(els, nel, elsize, cmp, payload);
 #endif

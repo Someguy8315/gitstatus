@@ -130,7 +130,11 @@ static void free_lowest_entry(git_pack_cache *cache)
 
 	git_offmap_foreach(cache->entries, offset, entry, {
 		if (entry) {
+#ifdef GIT_WIN32
+      long refcount;
+#else
       int refcount;
+#endif
       __atomic_load(&entry->refcount.val, &refcount, __ATOMIC_ACQUIRE);
       if (refcount == 0) {
         cache->memory_used -= entry->raw.len;
