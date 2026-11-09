@@ -35,9 +35,9 @@ In an "x64 Native Tools Command Prompt for VS 2022":
 
 ```bat
 git clone --depth 1 --branch 1.9.7-gitstatus https://github.com/Someguy8315/libgit2
+set CFLAGS=/DGIT_ZERO_NSEC
 cmake -S libgit2 -B libgit2\build -G Ninja ^
   -DCMAKE_C_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release ^
-  -DCMAKE_C_FLAGS="/DWIN32 /D_WINDOWS /DGIT_ZERO_NSEC" ^
   -DCMAKE_INSTALL_PREFIX=%CD%\libgit2-install ^
   -DBUILD_SHARED_LIBS=OFF -DSTATIC_CRT=ON -DUSE_THREADS=ON -DUSE_BUNDLED_ZLIB=ON ^
   -DREGEX_BACKEND=builtin -DUSE_HTTP_PARSER=builtin -DUSE_SSH=OFF -DUSE_HTTPS=OFF ^
