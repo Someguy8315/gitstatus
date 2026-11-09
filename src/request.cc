@@ -17,11 +17,20 @@
 
 #include "request.h"
 
+#ifdef _WIN32
+#include <windows.h>
+
+#include <io.h>
+
+#include <chrono>
+#include <thread>
+#else
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/select.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdlib>
@@ -49,6 +58,10 @@ Request ParseRequest(const std::string& s) {
   }
   sep = std::find(begin, end, kFieldSep);
   res.dir.assign(begin, sep);
+#ifdef _WIN32
+  // libgit2 reports paths with '/'. Normalizing here keeps repo cache keys consistent.
+  std::replace(res.dir.begin(), res.dir.end(), '\\', '/');
+#endif
   if (sep == end) return res;
 
   begin = sep + 1;
@@ -57,6 +70,7 @@ Request ParseRequest(const std::string& s) {
   return res;
 }
 
+#ifndef _WIN32
 bool IsLockedFd(int fd) {
   CHECK(fd >= 0);
   struct flock flock = {};
@@ -65,6 +79,7 @@ bool IsLockedFd(int fd) {
   CHECK(fcntl(fd, F_GETLK, &flock) != -1) << Errno();
   return flock.l_type != F_UNLCK;
 }
+#endif
 
 }  // namespace
 
@@ -74,6 +89,70 @@ std::ostream& operator<<(std::ostream& strm, const Request& req) {
   if (!req.diff) strm << " [no-diff]";
   return strm;
 }
+
+#ifdef _WIN32
+
+RequestReader::RequestReader(int fd, int lock_fd, int parent_pid)
+    : fd_(fd), lock_fd_(lock_fd), parent_pid_(parent_pid), input_(std::make_shared<Input>()) {
+  CHECK(lock_fd < 0) << "--lock-fd is not supported on Windows";
+  if (parent_pid >= 0) {
+    // Holding the handle keeps the PID from being reused while we watch it.
+    parent_ = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(parent_pid));
+    if (!parent_) {
+      LOG(INFO) << "Unable to open parent process " << parent_pid << ". Exiting.";
+      std::exit(0);
+    }
+  }
+  HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+  CHECK(h != INVALID_HANDLE_VALUE);
+  std::thread([h, input = input_] {
+    char buf[4096];
+    while (true) {
+      DWORD n = 0;
+      bool ok = ReadFile(h, buf, sizeof(buf), &n, nullptr);
+      std::unique_lock<std::mutex> lock(input->mutex);
+      if (!ok || n == 0) {
+        input->eof = true;
+      } else {
+        input->data.insert(input->data.end(), buf, buf + n);
+      }
+      input->cv.notify_one();
+      if (input->eof) return;
+    }
+  }).detach();
+}
+
+bool RequestReader::ReadRequest(Request& req) {
+  while (true) {
+    auto eol = std::find(read_.begin(), read_.end(), kMsgSep);
+    if (eol != read_.end()) {
+      std::string msg(read_.begin(), eol);
+      read_.erase(read_.begin(), eol + 1);
+      req = ParseRequest(msg);
+      return true;
+    }
+
+    std::unique_lock<std::mutex> lock(input_->mutex);
+    if (!input_->cv.wait_for(lock, std::chrono::seconds(1),
+                             [&] { return !input_->data.empty() || input_->eof; })) {
+      lock.unlock();
+      if (parent_ && WaitForSingleObject(parent_, 0) == WAIT_OBJECT_0) {
+        LOG(INFO) << "Parent process " << parent_pid_ << " is gone. Exiting.";
+        std::exit(0);
+      }
+      req = {};
+      return false;
+    }
+    if (input_->data.empty()) {
+      LOG(INFO) << "EOF. Exiting.";
+      std::exit(0);
+    }
+    read_.insert(read_.end(), input_->data.begin(), input_->data.end());
+    input_->data.clear();
+  }
+}
+
+#else  // _WIN32
 
 RequestReader::RequestReader(int fd, int lock_fd, int parent_pid)
     : fd_(fd), lock_fd_(lock_fd), parent_pid_(parent_pid) {
@@ -126,5 +205,7 @@ bool RequestReader::ReadRequest(Request& req) {
     }
   }
 }
+
+#endif  // _WIN32
 
 }  // namespace gitstatus

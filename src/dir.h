@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "arena.h"
+#include "platform.h"
 
 namespace gitstatus {
 
@@ -33,8 +34,9 @@ namespace gitstatus {
 //
 // Does not close dir_fd.
 //
-// There are two distinct implementations of ListDir -- one for Linux and another for everything
-// else. The linux-specific implementation is 20% faster.
+// There are three distinct implementations of ListDir -- one for Linux, one for native Windows
+// (in platform_win.cc) and another for everything else. The linux-specific implementation is 20%
+// faster than the generic one.
 //
 // The reason sorting is bundled with directory listing is performance on Linux. The API of
 // getdents64 allows for much faster sorting than what can be done with a plain vector<char*>.
@@ -42,7 +44,7 @@ namespace gitstatus {
 // done at the end with a generic StrSort() call.
 //
 // For best results, reuse the arena and vector for multiple calls to avoid heap allocations.
-bool ListDir(int dir_fd, Arena& arena, std::vector<char*>& entries, bool precompose_unicode,
+bool ListDir(DirFd dir_fd, Arena& arena, std::vector<char*>& entries, bool precompose_unicode,
              bool case_sensitive);
 
 }  // namespace gitstatus

@@ -17,11 +17,6 @@
 
 #include "tag_db.h"
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -152,9 +147,9 @@ void TagDb::ReadLooseTags() {
   loose_arena_.Reuse();
 
   std::string dirname = git_repository_path(repo_) + "refs/tags"s;
-  int dir_fd = open(dirname.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (dir_fd < 0) return;
-  ON_SCOPE_EXIT(&) { CHECK(!close(dir_fd)) << Errno(); };
+  DirFd dir_fd = OpenDir(dirname.c_str());
+  if (dir_fd == kNoDir) return;
+  ON_SCOPE_EXIT(&) { CloseDir(dir_fd); };
   // TODO: recursively traverse directories so that the file refs/tags/foo/bar gets interpreted
   // as the tag foo/bar. See https://github.com/romkatv/gitstatus/issues/254.
   (void)ListDir(dir_fd, loose_arena_, loose_tags_, /* precompose_unicode = */ false,
@@ -176,8 +171,8 @@ void TagDb::UpdatePack() {
   };
 
   std::string pack_path = git_repository_path(repo_) + "packed-refs"s;
-  struct stat st;
-  if (stat(pack_path.c_str(), &st)) {
+  Stat st;
+  if (!StatPath(pack_path.c_str(), &st)) {
     Reset();
     return;
   }
@@ -188,13 +183,13 @@ void TagDb::UpdatePack() {
   try {
     while (true) {
       LOG(INFO) << "Parsing " << Print(pack_path);
-      int fd = open(pack_path.c_str(), O_RDONLY | O_CLOEXEC);
+      int fd = OpenFile(pack_path.c_str());
       VERIFY(fd >= 0);
       ON_SCOPE_EXIT(&) { CHECK(!close(fd)) << Errno(); };
       pack_.resize(st.st_size + 1);
       ssize_t n = read(fd, &pack_[0], st.st_size + 1);
       VERIFY(n >= 0) << Errno();
-      VERIFY(!fstat(fd, &pack_stat_)) << Errno();
+      VERIFY(StatFile(fd, &pack_stat_)) << Errno();
       if (!StatEq(st, pack_stat_)) {
         st = pack_stat_;
         continue;

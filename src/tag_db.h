@@ -18,10 +18,6 @@
 #ifndef ROMKATV_GITSTATUS_TAG_DB_H_
 #define ROMKATV_GITSTATUS_TAG_DB_H_
 
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <git2.h>
 
 #include <condition_variable>
@@ -31,6 +27,7 @@
 #include <vector>
 
 #include "arena.h"
+#include "platform.h"
 
 namespace gitstatus {
 
@@ -61,7 +58,7 @@ class TagDb {
   git_refdb* const refdb_;
 
   Arena pack_arena_;
-  struct stat pack_stat_ = {};
+  Stat pack_stat_ = {};
   WithArena<std::string> pack_;
   WithArena<std::vector<const Tag*>> name2id_;
   WithArena<std::vector<const Tag*>> id2name_;

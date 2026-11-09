@@ -23,13 +23,9 @@
 #include <sstream>
 #include <utility>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include "arena.h"
 #include "check.h"
+#include "platform.h"
 #include "print.h"
 #include "scope_guard.h"
 
@@ -77,9 +73,9 @@ std::string RepoState(git_repository* repo) {
   };
 
   auto DirExists = [&](StringView name) {
-    int fd = open(arena.StrCat(gitdir, "/", name), O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return false;
-    CHECK(!close(fd)) << Errno();
+    DirFd fd = OpenDir(arena.StrCat(gitdir, "/", name));
+    if (fd == kNoDir) return false;
+    CloseDir(fd);
     return true;
   };
 

@@ -17,6 +17,11 @@
 
 #include <time.h>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include <cstddef>
 #include <future>
 #include <string>
@@ -180,6 +185,10 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
 
 int GitStatus(int argc, char** argv) {
   tzset();
+#ifdef _WIN32
+  // Responses may contain '\n' (e.g., in commit summaries) that must not become "\r\n".
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
   Options opts = ParseOptions(argc, argv);
   g_min_log_level = opts.log_level;
   for (int i = 0; i != argc; ++i) LOG(INFO) << "argv[" << i << "]: " << Print(argv[i]);

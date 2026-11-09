@@ -17,10 +17,6 @@
 
 #include "index.h"
 
-#include <dirent.h>
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <condition_variable>
 #include <cstdint>
@@ -35,6 +31,7 @@
 #include "dir.h"
 #include "git.h"
 #include "index.h"
+#include "platform.h"
 #include "print.h"
 #include "scope_guard.h"
 #include "stat.h"
@@ -68,7 +65,7 @@ bool MTimeEq(const git_index_time& index, const struct timespec& workdir) {
 #endif
 }
 
-bool IsModified(const git_index_entry* entry, const struct stat& st, const RepoCaps& caps) {
+bool IsModified(const git_index_entry* entry, const Stat& st, const RepoCaps& caps) {
   mode_t mode = st.st_mode;
   if (S_ISREG(mode)) {
     if (!caps.has_symlinks && S_ISLNK(entry->mode)) {
@@ -103,13 +100,9 @@ bool IsModified(const git_index_entry* entry, const struct stat& st, const RepoC
   return res;
 }
 
-int OpenDir(int parent_fd, const char* name) {
-  return openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-}
-
-void OpenTail(int* fds, size_t nfds, int root_fd, StringView dirname, Arena& arena) {
-  CHECK(fds && nfds && root_fd >= 0);
-  std::fill(fds, fds + nfds, -1);
+void OpenTail(DirFd* fds, size_t nfds, DirFd root_fd, StringView dirname, Arena& arena) {
+  CHECK(fds && nfds && root_fd != kNoDir);
+  std::fill(fds, fds + nfds, kNoDir);
   if (!dirname.len) return;
   CHECK(dirname.len > 1);
   CHECK(dirname.ptr[0] != '/');
@@ -131,10 +124,10 @@ void OpenTail(int* fds, size_t nfds, int root_fd, StringView dirname, Arena& are
 
   for (size_t i = subdirs.size(); i != 1; --i) {
     const char* path = subdirs[i - 1];
-    if ((root_fd = OpenDir(root_fd, path)) < 0) {
+    if ((root_fd = OpenDirAt(root_fd, path)) == kNoDir) {
       for (; i != subdirs.size(); ++i) {
-        CHECK(!close(fds[i - 1])) << Errno();
-        fds[i - 1] = -1;
+        CloseDir(fds[i - 1]);
+        fds[i - 1] = kNoDir;
       }
       return;
     }
@@ -142,7 +135,7 @@ void OpenTail(int* fds, size_t nfds, int root_fd, StringView dirname, Arena& are
   }
 }
 
-std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const* begin,
+std::vector<const char*> ScanDirs(git_index* index, DirFd root_fd, IndexDir* const* begin,
                                   IndexDir* const* end, const RepoCaps& caps,
                                   const ScanOpts& opts) {
   const Str<> str(caps.case_sensitive);
@@ -158,12 +151,12 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
   };
 
   constexpr ssize_t kDirStackSize = 5;
-  int dir_fd[kDirStackSize];
-  std::fill(std::begin(dir_fd), std::end(dir_fd), -1);
-  auto Close = [](int& fd) {
-    if (fd >= 0) {
-      CHECK(!close(fd)) << Errno();
-      fd = -1;
+  DirFd dir_fd[kDirStackSize];
+  std::fill(std::begin(dir_fd), std::end(dir_fd), kNoDir);
+  auto Close = [](DirFd& fd) {
+    if (fd != kNoDir) {
+      CloseDir(fd);
+      fd = kNoDir;
     }
   };
   auto CloseAll = [&] { std::for_each(std::begin(dir_fd), std::end(dir_fd), Close); };
@@ -189,10 +182,10 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
     };
 
     auto StatFiles = [&]() {
-      struct stat st;
+      Stat st;
       for (const git_index_entry* file : dir.files) {
-        if (fstatat(*dir_fd, Basename(file), &st, AT_SYMLINK_NOFOLLOW)) {
-          AddCandidate(errno == ENOENT ? "deleted" : "unreadable", file->path);
+        if (int err = LStatAt(*dir_fd, Basename(file), &st)) {
+          AddCandidate(err == ENOENT ? "deleted" : "unreadable", file->path);
         } else if (IsModified(file, st, caps)) {
           AddCandidate(nullptr, file->path);
         }
@@ -200,9 +193,10 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
     };
 
     ssize_t d = 0;
-    if ((it == begin || (d = it[-1]->depth + 1 - dir.depth) < kDirStackSize) && dir_fd[d] >= 0) {
+    if ((it == begin || (d = it[-1]->depth + 1 - dir.depth) < kDirStackSize) &&
+        dir_fd[d] != kNoDir) {
       CHECK(d >= 0);
-      int fd = OpenDir(dir_fd[d], arena.StrDup(dir.basename.ptr, dir.basename.len));
+      DirFd fd = OpenDirAt(dir_fd[d], arena.StrDup(dir.basename.ptr, dir.basename.len));
       for (ssize_t i = 0; i != d; ++i) Close(dir_fd[i]);
       std::rotate(dir_fd, dir_fd + (d ? d : kDirStackSize) - 1, dir_fd + kDirStackSize);
       Close(*dir_fd);
@@ -212,12 +206,12 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
       if (dir.path.len) {
         CHECK(dir.path.ptr[0] != '/');
         CHECK(dir.path.ptr[dir.path.len - 1] == '/');
-        *dir_fd = OpenDir(root_fd, arena.StrDup(dir.path.ptr, dir.path.len - 1));
+        *dir_fd = OpenDirAt(root_fd, arena.StrDup(dir.path.ptr, dir.path.len - 1));
       } else {
-        VERIFY((*dir_fd = dup(root_fd)) >= 0) << Errno();
+        VERIFY((*dir_fd = DupDir(root_fd)) != kNoDir) << Errno();
       }
     }
-    if (*dir_fd < 0) {
+    if (*dir_fd == kNoDir) {
       CloseAll();
       AddUnmached("");
       continue;
@@ -229,8 +223,8 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
     }
 
     if (opts.untracked_cache != Tribool::kFalse) {
-      struct stat st;
-      if (fstat(*dir_fd, &st)) {
+      Stat st;
+      if (!StatDir(*dir_fd, &st)) {
         AddUnmached("");
         continue;
       }
@@ -264,8 +258,8 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
         if (cmp < 0) {
           AddCandidate("deleted", (*file)->path);
         } else if (cmp == 0) {
-          struct stat st;
-          if (fstatat(*dir_fd, entry, &st, AT_SYMLINK_NOFOLLOW)) {
+          Stat st;
+          if (LStatAt(*dir_fd, entry, &st)) {
             AddCandidate("unreadable", (*file)->path);
           } else if (IsModified(*file, st, caps)) {
             AddCandidate(nullptr, (*file)->path);
@@ -412,9 +406,9 @@ void Index::InitSplits(size_t total_weight) {
 }
 
 std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts) {
-  int root_fd = open(root_dir_, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  VERIFY(root_fd >= 0);
-  ON_SCOPE_EXIT(&) { CHECK(!close(root_fd)) << Errno(); };
+  DirFd root_fd = OpenDir(root_dir_);
+  VERIFY(root_fd != kNoDir);
+  ON_SCOPE_EXIT(&) { CloseDir(root_fd); };
 
   CHECK(!splits_.empty());
 

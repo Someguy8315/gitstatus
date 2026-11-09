@@ -4,6 +4,8 @@ This independent copy builds gitstatusd against **libgit2 1.9.7**, with the rema
 gitstatusd extensions committed in [Someguy8315/libgit2](https://github.com/Someguy8315/libgit2/tree/1.9.7-gitstatus).
 See [dependency maintenance and testing](docs/libgit2.md) for the patch audit,
 build instructions, and regression tests. Building does not change your shell or p10k configuration.
+A native Windows build (clang-cl, MSVC ABI) with PowerShell bindings is described in
+[docs/windows.md](docs/windows.md).
 
 - **THE PROJECT HAS VERY LIMITED SUPPORT**
 - **NO NEW FEATURES ARE IN THE WORKS**

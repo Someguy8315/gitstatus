@@ -23,6 +23,7 @@
 #include <sstream>
 #include <string>
 
+#include "platform.h"
 #include "string_view.h"
 
 namespace gitstatus {

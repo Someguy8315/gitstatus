@@ -22,6 +22,12 @@
 #include <ostream>
 #include <string>
 
+#ifdef _WIN32
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#endif
+
 namespace gitstatus {
 
 struct Request {
@@ -43,6 +49,20 @@ class RequestReader {
   int lock_fd_;
   int parent_pid_;
   std::deque<char> read_;
+
+#ifdef _WIN32
+  // Native Windows cannot select() on pipes. A detached thread does blocking reads into this
+  // buffer and ReadRequest() waits for data with a timeout instead.
+  struct Input {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<char> data;
+    bool eof = false;
+  };
+  std::shared_ptr<Input> input_;
+  // Handle of the parent process (HANDLE), or null.
+  void* parent_ = nullptr;
+#endif
 };
 
 }  // namespace gitstatus

@@ -21,6 +21,7 @@
 
 #include "check.h"
 #include "git.h"
+#include "platform.h"
 #include "print.h"
 #include "scope_guard.h"
 #include "string_view.h"
@@ -41,8 +42,8 @@ void GitDirs(const char* dir, bool from_dotgit, std::string& gitdir, std::string
     case 0:
       gitdir.assign(gitdir_buf.ptr, gitdir_buf.size);
       workdir.assign(workdir_buf.ptr, workdir_buf.size);
-      VERIFY(!gitdir.empty() && gitdir.front() == '/' && gitdir.back() == '/');
-      VERIFY(!workdir.empty() && workdir.front() == '/' && workdir.back() == '/');
+      VERIFY(!gitdir.empty() && IsAbsPath(gitdir.c_str()) && gitdir.back() == '/');
+      VERIFY(!workdir.empty() && IsAbsPath(workdir.c_str()) && workdir.back() == '/');
       break;
     case GIT_ENOTFOUND:
       gitdir.clear();
@@ -84,7 +85,7 @@ std::string DirName(std::string path) {
 }  // namespace
 
 Repo* RepoCache::Open(const std::string& dir, bool from_dotgit) {
-  if (dir.empty() || dir.front() != '/') return nullptr;
+  if (!IsAbsPath(dir.c_str())) return nullptr;
 
   std::string gitdir, workdir;
   GitDirs(dir.c_str(), from_dotgit, gitdir, workdir);
@@ -122,7 +123,7 @@ Repo* RepoCache::Open(const std::string& dir, bool from_dotgit) {
   if (git_repository_is_bare(repo)) return nullptr;
   workdir = git_repository_workdir(repo) ?: "";
   if (workdir.empty()) return nullptr;
-  VERIFY(workdir.front() == '/' && workdir.back() == '/') << Print(workdir);
+  VERIFY(IsAbsPath(workdir.c_str()) && workdir.back() == '/') << Print(workdir);
 
   auto x = cache_.emplace(gitdir, nullptr);
   std::unique_ptr<Entry>& elem = x.first->second;

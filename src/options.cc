@@ -17,9 +17,13 @@
 
 #include "options.h"
 
+#ifdef _WIN32
+#include "getopt_win.h"
+#else
 #include <fnmatch.h>
 #include <getopt.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <climits>

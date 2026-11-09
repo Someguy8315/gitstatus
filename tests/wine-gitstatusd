@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Run a native Windows gitstatusd.exe under Wine as a drop-in for the Linux daemon.
+
+Usage: GITSTATUS_WINE_EXE=/path/to/gitstatusd.exe GITSTATUS_TEST_DAEMON=tests/wine-gitstatusd make test
+
+Wine exposes the Linux root as drive Z:. Request directories are rewritten from /x to Z:/x and
+the workdir field of responses back from Z:/x to /x, so the protocol tests can compare paths
+unchanged. Everything else is passed through byte for byte.
+"""
+
+import os
+import subprocess
+import sys
+import threading
+
+MSG_SEP = b"\x1e"
+FIELD_SEP = b"\x1f"
+
+
+def to_windows(req: bytes) -> bytes:
+    fields = req.split(FIELD_SEP)
+    if len(fields) >= 2:
+        d = fields[1]
+        prefix = b":" if d.startswith(b":") else b""
+        d = d[len(prefix) :]
+        if d.startswith(b"/"):
+            fields[1] = prefix + b"Z:" + d
+    return FIELD_SEP.join(fields)
+
+
+def to_linux(resp: bytes) -> bytes:
+    fields = resp.split(FIELD_SEP)
+    if len(fields) >= 3 and fields[1] == b"1" and fields[2][:2] in (b"Z:", b"z:"):
+        fields[2] = fields[2][2:]
+    return FIELD_SEP.join(fields)
+
+
+def pump(src, dst, transform):
+    buf = b""
+    try:
+        while chunk := src.read1(1 << 16):
+            buf += chunk
+            *msgs, buf = buf.split(MSG_SEP)
+            for msg in msgs:
+                dst.write(transform(msg) + MSG_SEP)
+            dst.flush()
+        dst.close()
+    except BrokenPipeError:
+        pass  # the other side exited
+
+
+def main() -> int:
+    exe = os.environ.get("GITSTATUS_WINE_EXE")
+    if not exe:
+        print("wine-gitstatusd: set GITSTATUS_WINE_EXE to gitstatusd.exe", file=sys.stderr)
+        return 2
+    env = dict(os.environ, WINEDEBUG=os.environ.get("WINEDEBUG", "-all"))
+    # gitstatusd is a console program; keep Wine from probing the display.
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    args = sys.argv[1:]
+    # A Linux --parent-pid means nothing to a Windows process. Drop it: the daemon still exits
+    # on EOF when the client goes away.
+    for i, arg in enumerate(args[:-1]):
+        if arg in ("-p", "--parent-pid"):
+            args[i + 1] = "-1"
+    proc = subprocess.Popen(
+        ["wine", exe, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env
+    )
+    threading.Thread(
+        target=pump, args=(sys.stdin.buffer, proc.stdin, to_windows), daemon=True
+    ).start()
+    pump(proc.stdout, sys.stdout.buffer, to_linux)
+    return proc.wait()
+
+
+if __name__ == "__main__":
+    rc = main()
+    # pump() has already flushed and closed stdout. The stdin pump thread may be blocked in a
+    # buffered read, and normal interpreter shutdown would then abort ("could not acquire lock for <_io.BufferedReader name='<stdin>'>").
+    os._exit(rc)

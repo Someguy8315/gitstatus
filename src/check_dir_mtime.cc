@@ -17,12 +17,19 @@
 
 #include "check_dir_mtime.h"
 
+#ifdef _WIN32
+#include <windows.h>
+
+#include <direct.h>
+#include <io.h>
+#else
 #include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
@@ -43,22 +50,41 @@ namespace {
 
 constexpr char kDirPrefix[] = ".gitstatus.";
 
+#ifdef _WIN32
+// Read-only files cannot be deleted on Windows.
+constexpr int kTouchMode = _S_IREAD | _S_IWRITE;
+int MkDir(const char* path) { return _mkdir(path); }
+char* MkdTemp(char* tmpl) {
+  return !_mktemp_s(tmpl, std::strlen(tmpl) + 1) && !_mkdir(tmpl) ? tmpl : nullptr;
+}
+void SleepOneSecond() { Sleep(1000); }
+#else
+constexpr int kTouchMode = 0444;
+int MkDir(const char* path) { return mkdir(path, 0755); }
+char* MkdTemp(char* tmpl) { return mkdtemp(tmpl); }
+void SleepOneSecond() {
+  while (sleep(1)) {
+    // zzzz
+  }
+}
+#endif
+
 void Touch(const char* path) {
-  int fd = creat(path, 0444);
+  int fd = creat(path, kTouchMode);
   VERIFY(fd >= 0) << Errno();
   CHECK(!close(fd)) << Errno();
 }
 
-bool StatChanged(const char* path, const struct stat& prev) {
-  struct stat cur;
-  VERIFY(!lstat(path, &cur)) << Errno();
+bool StatChanged(const char* path, const Stat& prev) {
+  Stat cur;
+  VERIFY(LStatPath(path, &cur)) << Errno();
   return !StatEq(prev, cur);
 }
 
 void RemoveStaleDirs(const char* root_dir) {
-  int dir_fd = open(root_dir, O_DIRECTORY | O_CLOEXEC);
-  if (dir_fd < 0) return;
-  ON_SCOPE_EXIT(&) { CHECK(!close(dir_fd)) << Errno(); };
+  DirFd dir_fd = OpenDir(root_dir);
+  if (dir_fd == kNoDir) return;
+  ON_SCOPE_EXIT(&) { CloseDir(dir_fd); };
 
   Arena arena;
   std::vector<char*> entries;
@@ -76,8 +102,8 @@ void RemoveStaleDirs(const char* root_dir) {
     if (std::strlen(entry) < std::strlen(kDirPrefix)) continue;
     if (std::memcmp(entry, kDirPrefix, std::strlen(kDirPrefix))) continue;
 
-    struct stat st;
-    if (fstatat(dir_fd, entry, &st, AT_SYMLINK_NOFOLLOW)) {
+    Stat st;
+    if (LStatAt(dir_fd, entry, &st)) {
       LOG(WARN) << "Cannot stat " << Print(entry) << " in " << Print(root_dir) << ": " << Errno();
       continue;
     }
@@ -111,27 +137,25 @@ bool CheckDirMtime(const char* root_dir) {
     RemoveStaleDirs(root_dir);
 
     std::string tmp = std::string() + root_dir + kDirPrefix + "XXXXXX";
-    VERIFY(mkdtemp(&tmp[0])) << Errno();
+    VERIFY(MkdTemp(&tmp[0])) << Errno();
     ON_SCOPE_EXIT(&) { rmdir(tmp.c_str()); };
 
     std::string a_dir = tmp + "/a";
-    VERIFY(!mkdir(a_dir.c_str(), 0755)) << Errno();
+    VERIFY(!MkDir(a_dir.c_str())) << Errno();
     ON_SCOPE_EXIT(&) { rmdir(a_dir.c_str()); };
-    struct stat a_st;
-    VERIFY(!lstat(a_dir.c_str(), &a_st)) << Errno();
+    Stat a_st;
+    VERIFY(LStatPath(a_dir.c_str(), &a_st)) << Errno();
 
     std::string b_dir = tmp + "/b";
-    VERIFY(!mkdir(b_dir.c_str(), 0755)) << Errno();
+    VERIFY(!MkDir(b_dir.c_str())) << Errno();
     ON_SCOPE_EXIT(&) { rmdir(b_dir.c_str()); };
-    struct stat b_st;
-    VERIFY(!lstat(b_dir.c_str(), &b_st)) << Errno();
+    Stat b_st;
+    VERIFY(LStatPath(b_dir.c_str(), &b_st)) << Errno();
 
-    while (sleep(1)) {
-      // zzzz
-    }
+    SleepOneSecond();
 
     std::string a1 = a_dir + "/1";
-    VERIFY(!mkdir(a1.c_str(), 0755)) << Errno();
+    VERIFY(!MkDir(a1.c_str())) << Errno();
     ON_SCOPE_EXIT(&) { rmdir(a1.c_str()); };
     if (!StatChanged(a_dir.c_str(), a_st)) {
       LOG(WARN) << "Creating a directory doesn't change mtime of the parent: " << Print(root_dir);

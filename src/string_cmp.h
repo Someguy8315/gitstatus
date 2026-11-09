@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "platform.h"
 #include "string_view.h"
 
 namespace gitstatus {

@@ -17,6 +17,9 @@
 
 #include "dir.h"
 
+// The native Windows implementation is in platform_win.cc.
+#ifndef _WIN32
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -235,3 +238,5 @@ bool ListDir(int dir_fd, Arena& arena, std::vector<char*>& entries, bool precomp
 #endif  // __linux__
 
 }  // namespace gitstatus
+
+#endif  // _WIN32
