@@ -105,6 +105,22 @@ bool IsModified(const git_index_entry* entry, const Stat& st, const RepoCaps& ca
   return res;
 }
 
+// Whether a file with this stat is a dirty candidate. Appends it to `stat_candidates` if so.
+bool IsStatCandidate(const git_index_entry* entry, const Stat& st, const RepoCaps& caps,
+                     const ScanOpts& opts, std::vector<StatCandidate>& stat_candidates) {
+  if (!IsModified(entry, st, caps)) return false;
+  if (!S_ISREG(st.st_mode) || GIT_INDEX_ENTRY_STAGE(entry)) return true;
+  if (opts.verified) {
+    auto it = opts.verified->find(entry->path);
+    if (it != opts.verified->end() && StatEq(it->second.st, st) &&
+        git_oid_equal(&it->second.id, &entry->id) && it->second.mode == entry->mode) {
+      return false;
+    }
+  }
+  stat_candidates.push_back({entry, st});
+  return true;
+}
+
 #ifdef _WIN32
 
 // Unlike the POSIX version below, this lists every directory even without include_untracked:
@@ -112,7 +128,8 @@ bool IsModified(const git_index_entry* entry, const Stat& st, const RepoCaps& ca
 // For the same reason it has no use for the untracked cache, which only saves the listing.
 std::vector<const char*> ScanDirs(git_index* index, const std::wstring& root,
                                   IndexDir* const* begin, IndexDir* const* end,
-                                  const RepoCaps& caps, const ScanOpts& opts) {
+                                  const RepoCaps& caps, const ScanOpts& opts,
+                                  std::vector<StatCandidate>& stat_candidates) {
   const Str<> str(caps.case_sensitive);
 
   Arena arena;
@@ -159,7 +176,9 @@ std::vector<const char*> ScanDirs(git_index* index, const std::wstring& root,
         if (cmp < 0) {
           AddCandidate("deleted", (*file)->path);
         } else if (cmp == 0) {
-          if (IsModified(*file, EntryStat(entry), caps)) AddCandidate(nullptr, (*file)->path);
+          if (IsStatCandidate(*file, EntryStat(entry), caps, opts, stat_candidates)) {
+            AddCandidate(nullptr, (*file)->path);
+          }
           matched = true;
           ++file;
           break;
@@ -236,7 +255,8 @@ void OpenTail(int* fds, size_t nfds, int root_fd, StringView dirname, Arena& are
 
 std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const* begin,
                                   IndexDir* const* end, const RepoCaps& caps,
-                                  const ScanOpts& opts) {
+                                  const ScanOpts& opts,
+                                  std::vector<StatCandidate>& stat_candidates) {
   const Str<> str(caps.case_sensitive);
 
   Arena arena;
@@ -285,7 +305,7 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
       for (const git_index_entry* file : dir.files) {
         if (fstatat(*dir_fd, Basename(file), &st, AT_SYMLINK_NOFOLLOW)) {
           AddCandidate(errno == ENOENT ? "deleted" : "unreadable", file->path);
-        } else if (IsModified(file, st, caps)) {
+        } else if (IsStatCandidate(file, st, caps, opts, stat_candidates)) {
           AddCandidate(nullptr, file->path);
         }
       }
@@ -359,7 +379,7 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
           struct stat st;
           if (fstatat(*dir_fd, entry, &st, AT_SYMLINK_NOFOLLOW)) {
             AddCandidate("unreadable", (*file)->path);
-          } else if (IsModified(*file, st, caps)) {
+          } else if (IsStatCandidate(*file, st, caps, opts, stat_candidates)) {
             AddCandidate(nullptr, (*file)->path);
           }
           matched = true;
@@ -503,7 +523,8 @@ void Index::InitSplits(size_t total_weight) {
   CHECK(std::adjacent_find(splits_.begin(), splits_.end()) == splits_.end());
 }
 
-std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts) {
+std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts,
+                                                   std::vector<StatCandidate>& stat_candidates) {
 #ifdef _WIN32
   const std::wstring root = WidePath(root_dir_);
 #else
@@ -531,11 +552,13 @@ std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts) {
         if (--inflight == 0) cv.notify_one();
       };
       try {
-        std::vector<const char*> candidates =
-            ScanDirs(git_index_, root, dirs_.data() + from, dirs_.data() + to, caps_, opts);
+        std::vector<StatCandidate> stats;
+        std::vector<const char*> candidates = ScanDirs(
+            git_index_, root, dirs_.data() + from, dirs_.data() + to, caps_, opts, stats);
         if (!candidates.empty()) {
           std::unique_lock<std::mutex> lock(mutex);
           res.insert(res.end(), candidates.begin(), candidates.end());
+          stat_candidates.insert(stat_candidates.end(), stats.begin(), stats.end());
         }
       } catch (const Exception&) {
         std::unique_lock<std::mutex> lock(mutex);

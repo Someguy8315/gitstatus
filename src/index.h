@@ -21,7 +21,9 @@
 #include <git2.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "arena.h"
@@ -41,9 +43,28 @@ struct RepoCaps {
   bool precompose_unicode;
 };
 
+// A file whose content matched its index entry although its stat didn't. gitstatusd never writes
+// the index, so without remembering this such files would be hashed again on every query.
+struct VerifiedFile {
+  Stat st;
+  git_oid id;
+  uint32_t mode;
+};
+
+// Keyed by index path.
+using VerifiedFiles = std::unordered_map<std::string, VerifiedFile>;
+
+// A tracked regular file whose stat differs from its index entry.
+struct StatCandidate {
+  const git_index_entry* entry;
+  Stat st;
+};
+
 struct ScanOpts {
   bool include_untracked;
   Tribool untracked_cache;
+  // Not dirty candidates while their stat and index entry stay the same. Can be null.
+  const VerifiedFiles* verified;
 };
 
 struct IndexDir {
@@ -64,7 +85,9 @@ class Index {
  public:
   Index(git_repository* repo, git_index* index);
 
-  std::vector<const char*> GetDirtyCandidates(const ScanOpts& opts);
+  // Stat candidates are also appended to `stat_candidates`.
+  std::vector<const char*> GetDirtyCandidates(const ScanOpts& opts,
+                                              std::vector<StatCandidate>& stat_candidates);
 
  private:
   size_t InitDirs(git_index* index);

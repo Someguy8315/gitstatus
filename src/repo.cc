@@ -28,10 +28,12 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <iterator>
 #include <memory>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 
 #include "arena.h"
@@ -173,9 +175,14 @@ IndexStats Repo::GetIndexStats(const git_oid* head, git_config* cfg) {
   Store(unstaged_, {});
   Store(untracked_, {});
   Store(unstaged_deleted_, {});
+  reported_.clear();
+  Store(dirty_scan_partial_, false);
 
   std::vector<const char*> dirty_candidates;
+  std::vector<StatCandidate> stat_candidates;
   const size_t index_size = git_index_entrycount(git_index_);
+  // Taken before listing so that a file modified after its stat was read has a newer mtime.
+  const std::time_t scan_start = std::time(nullptr);
 
   if (!lim_.max_num_staged && !lim_.max_num_conflicted) {
     head_ = {};
@@ -222,7 +229,9 @@ IndexStats Repo::GetIndexStats(const git_oid* head, git_config* cfg) {
       (lim_.max_num_unstaged || lim_.max_num_untracked)) {
     if (!index_) index_ = std::make_unique<Index>(repo_, git_index_);
     dirty_candidates = index_->GetDirtyCandidates({.include_untracked = lim_.max_num_untracked > 0,
-                                                   .untracked_cache = Load(untracked_cache_)});
+                                                   .untracked_cache = Load(untracked_cache_),
+                                                   .verified = &verified_},
+                                                  stat_candidates);
     if (dirty_candidates.empty()) {
       LOG(INFO) << "Clean repo: no dirty candidates";
     } else {
@@ -234,6 +243,7 @@ IndexStats Repo::GetIndexStats(const git_oid* head, git_config* cfg) {
 
   Wait();
   VERIFY(!Load(error_));
+  RememberVerified(stat_candidates, scan_start, index_size);
 
   size_t num_staged = std::min(Load(staged_), lim_.max_num_staged);
   size_t num_unstaged = std::min(Load(unstaged_), lim_.max_num_unstaged);
@@ -267,6 +277,7 @@ int Repo::OnDelta(const char* type, const git_diff_delta& d, std::atomic<size_t>
     LOG(INFO) << Msg();
   }
   if (v + 1 < m1) return GIT_DIFF_DELTA_DO_NOT_INSERT;
+  Store(dirty_scan_partial_, true);
   if (Load(c2) < m2) return GIT_DIFF_DELTA_DO_NOT_INSERT | GIT_DIFF_DELTA_SKIP_TYPE;
   return GIT_EUSER;
 }
@@ -295,6 +306,10 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
                            repo->unstaged_, repo->lim_.max_num_unstaged);
     } else {
       if (delta->status == GIT_DELTA_DELETED) Inc(repo->unstaged_deleted_);
+      {
+        std::unique_lock<std::mutex> lock(repo->reported_mutex_);
+        repo->reported_.push_back(delta->old_file.path);
+      }
       return repo->OnDelta("unstaged", *delta, repo->unstaged_, repo->lim_.max_num_unstaged,
                            repo->untracked_, repo->lim_.max_num_untracked);
     }
@@ -332,6 +347,20 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
           throw Exception();
       }
     });
+  }
+}
+
+void Repo::RememberVerified(const std::vector<StatCandidate>& candidates, std::time_t scan_start,
+                            size_t index_size) {
+  if (candidates.empty() || Load(dirty_scan_partial_)) return;
+  // Bound the entries of files that were since deleted, renamed or changed.
+  if (verified_.size() > index_size) verified_.clear();
+  std::unordered_set<std::string> reported(reported_.begin(), reported_.end());
+  for (const StatCandidate& c : candidates) {
+    if (reported.count(c.entry->path)) continue;
+    // A file modified in the same second as its listing could keep that stat after a change.
+    if (MTim(c.st).tv_sec + 1 >= scan_start) continue;
+    verified_[c.entry->path] = {c.st, c.entry->id, c.entry->mode};
   }
 }
 

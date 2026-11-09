@@ -32,6 +32,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <future>
 #include <memory>
@@ -103,6 +104,9 @@ class Repo {
 
   void StartStagedScan(const git_oid* head);
   void StartDirtyScan(const std::vector<const char*>& paths);
+  // Remembers the stat candidates that the completed dirty scan found unchanged.
+  void RememberVerified(const std::vector<StatCandidate>& candidates, std::time_t scan_start,
+                        size_t index_size);
 
   void DecInflight();
   void RunAsync(std::function<void()> f);
@@ -118,6 +122,13 @@ class Repo {
   std::vector<CommitCount> commit_counts_;
 
   std::unique_ptr<Index> index_;
+  VerifiedFiles verified_;
+
+  // Paths of the unstaged changes found by the current dirty scan.
+  std::mutex reported_mutex_;
+  std::vector<std::string> reported_;
+  // Set when the dirty scan may have skipped changes, such as after reaching a limit.
+  std::atomic<bool> dirty_scan_partial_{false};
 
   std::mutex mutex_;
   std::condition_variable cv_;

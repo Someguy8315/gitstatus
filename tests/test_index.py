@@ -1,5 +1,6 @@
 """Exercise a persistent native Windows daemon as a repository changes between queries."""
 
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -11,11 +12,12 @@ import unittest
 BINARY = Path(__file__).resolve().parents[1] / "obj" / "gitstatusd.exe"
 
 
-def git(cwd, *args):
+def git(cwd, *args, input=None):
     return subprocess.check_output(
         ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
          "-c", "protocol.file.allow=always", *args],
         cwd=cwd,
+        input=input,
         stderr=subprocess.STDOUT,
     ).decode()
 
@@ -145,6 +147,30 @@ class IndexRefreshTest(unittest.TestCase):
 
 
 class ChangesTest(unittest.TestCase):
+    def test_touched_files(self):
+        with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
+            root = Path(temporary)
+            init(root)
+            files = [root / f"{i}.txt" for i in range(3)]
+            for f in files:
+                f.write_text("same\n")
+            git(root, "add", ".")
+            git(root, "commit", "-m", "base")
+            # Content matches the index but the stat doesn't, as after a checkout elsewhere.
+            for f in files:
+                old = f.stat().st_mtime - 3600
+                os.utime(f, (old, old))
+
+            with Daemon(self) as daemon:
+                daemon.check(root, (0, 0, 0, 0))
+                daemon.check(root, (0, 0, 0, 0))
+                files[0].write_text("diff\n")
+                daemon.check(root, (0, 1, 0, 0))
+                # A new index entry for an unchanged file.
+                blob = git(root, "hash-object", "-w", "--stdin", input=b"staged\n").strip()
+                git(root, "update-index", "--cacheinfo", f"100644,{blob},1.txt")
+                daemon.check(root, (1, 2, 0, 0))
+
     def test_many_changes_in_one_directory(self):
         with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
             root = Path(temporary)
