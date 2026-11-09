@@ -30,6 +30,8 @@ struct git_index {
 	char *index_file_path;
 	git_futils_filestamp stamp;
 	git_oid checksum;   /* checksum at the end of the file */
+	/* the file as last read if its checksum was omitted (index.skipHash), to detect changes */
+	git_buf unhashed;
 
 	git_vector entries;
 	git_idxmap *entries_map;
