@@ -107,6 +107,9 @@ extern int git_submodule_cache_refresh(git_repository *repo);
 /* Release all submodules */
 extern void git_submodule_cache_free(git_repository *repo);
 
+/* Close the submodule repositories kept open by git_submodule__status */
+extern void git_submodule__wd_repos_free(git_repository *repo);
+
 /* Additional flags on top of public GIT_SUBMODULE_STATUS values */
 enum {
 	GIT_SUBMODULE_STATUS__WD_SCANNED          = (1u << 20),

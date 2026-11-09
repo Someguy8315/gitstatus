@@ -1,12 +1,102 @@
-"""Exercise index refreshes through one persistent native Windows daemon."""
+"""Exercise a persistent native Windows daemon as a repository changes between queries."""
 
 from pathlib import Path
+import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
 
 
 BINARY = Path(__file__).resolve().parents[1] / "obj" / "gitstatusd.exe"
+
+
+def git(cwd, *args):
+    return subprocess.check_output(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "-c", "protocol.file.allow=always", *args],
+        cwd=cwd,
+        stderr=subprocess.STDOUT,
+    ).decode()
+
+
+def init(root, *config):
+    git(root, "init", "-b", "main", str(root))
+    for key, value in (("core.fsmonitor", "false"), ("core.untrackedCache", "false"), *config):
+        git(root, "config", key, value)
+
+
+def git_counts(root):
+    """Staged, unstaged, conflicted and untracked counts as reported by git status."""
+    out = git(root, "--no-optional-locks", "-c", "status.renames=false", "status",
+              "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=dirty")
+    counts = [0, 0, 0, 0]
+    for record in out.split("\0"):
+        xy = record[:2]
+        if len(xy) < 2:
+            continue
+        if xy == "??":
+            counts[3] += 1
+        elif xy in ("DD", "AU", "UD", "UA", "DU", "AA", "UU"):
+            counts[2] += 1
+        else:
+            counts[0] += xy[0] != " "
+            counts[1] += xy[1] != " "
+    return tuple(counts)
+
+
+def rmtree(path):
+    def writable(func, p, _):
+        Path(p).chmod(stat.S_IWRITE)
+        func(p)
+    shutil.rmtree(path, onerror=writable)
+
+
+class Daemon:
+    def __init__(self, test):
+        self.test = test
+        self.process = subprocess.Popen(
+            [str(BINARY), "-s", "-1", "-u", "-1", "-c", "-1", "-d", "-1",
+             "-t", "8", "-v", "ERROR", "-U", "-W", "-D"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
+
+    def fields(self, root):
+        self.process.stdin.write(f"1\x1f{Path(root).as_posix()}\x1e".encode())
+        self.process.stdin.flush()
+        response = bytearray()
+        while not response.endswith(b"\x1e"):
+            byte = self.process.stdout.read(1)
+            self.test.assertTrue(byte, "daemon closed its output")
+            response.extend(byte)
+        fields = response.decode().rstrip("\x1e").split("\x1f")
+        self.test.assertEqual(len(fields), 29)
+        self.test.assertEqual(fields[1], "1")
+        return fields
+
+    def counts(self, root):
+        return tuple(map(int, self.fields(root)[10:14]))
+
+    def check(self, root, expected):
+        """Asserts the daemon agrees with git status and the expected counts."""
+        self.test.assertEqual(git_counts(root), expected)
+        self.test.assertEqual(self.counts(root), expected)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.process.stdin.close()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+            raise
+        finally:
+            self.process.stdout.close()
+        self.test.assertEqual(self.process.returncode, 0)
 
 
 class IndexRefreshTest(unittest.TestCase):
@@ -16,85 +106,83 @@ class IndexRefreshTest(unittest.TestCase):
                 with self.subTest(skip_hash=skip_hash, reset_author_date=reset_author_date):
                     with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
                         root = Path(temporary)
-
-                        def git(*args):
-                            return subprocess.check_output(
-                                ["git", "-c", "user.name=Test", "-c",
-                                 "user.email=test@example.com", *args],
-                                cwd=root,
-                                stderr=subprocess.STDOUT,
-                            ).decode()
-
-                        git("init", "-b", "main")
-                        git("config", "feature.manyFiles", "true")
-                        git("config", "index.skipHash", str(skip_hash).lower())
-                        git("config", "core.fsmonitor", "false")
-                        git("config", "core.untrackedCache", "false")
+                        init(root, ("feature.manyFiles", "true"),
+                             ("index.skipHash", str(skip_hash).lower()))
                         directory = root / "nested" / "files"
                         directory.mkdir(parents=True)
                         for i in range(14):
                             (directory / f"old_{i}.txt").write_text(f"file {i}\n")
                         (root / "feature.txt").write_text("base\n")
-                        git("add", ".")
-                        git("commit", "-m", "base")
-                        git("switch", "-c", "feature")
+                        git(root, "add", ".")
+                        git(root, "commit", "-m", "base")
+                        git(root, "switch", "-c", "feature")
                         (root / "feature.txt").write_text("feature\n")
-                        git("commit", "-am", "feature")
-                        git("switch", "main")
+                        git(root, "commit", "-am", "feature")
+                        git(root, "switch", "main")
                         for i in range(14):
-                            git("mv", f"nested/files/old_{i}.txt", f"nested/files/new_{i}.txt")
-                        git("commit", "-m", "rename")
-                        git("switch", "feature")
+                            git(root, "mv", f"nested/files/old_{i}.txt", f"nested/files/new_{i}.txt")
+                        git(root, "commit", "-m", "rename")
+                        git(root, "switch", "feature")
                         checksum = (root / ".git" / "index").read_bytes()[-20:]
                         self.assertEqual(checksum == bytes(20), skip_hash)
 
-                        daemon = subprocess.Popen(
-                            [str(BINARY), "-s", "-1", "-u", "-1", "-c", "-1", "-d", "-1",
-                             "-t", "8", "-v", "ERROR", "-U", "-W", "-D"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                        )
-
-                        def counts():
-                            daemon.stdin.write(f"1\x1f{root.as_posix()}\x1e".encode())
-                            daemon.stdin.flush()
-                            response = bytearray()
-                            while not response.endswith(b"\x1e"):
-                                byte = daemon.stdout.read(1)
-                                self.assertTrue(byte, "daemon closed its output")
-                                response.extend(byte)
-                            fields = response.decode().rstrip("\x1e").split("\x1f")
-                            self.assertEqual(len(fields), 29)
-                            self.assertEqual(fields[1], "1")
-                            return tuple(map(int, fields[10:14]))
-
-                        try:
-                            self.assertEqual(counts(), (0, 0, 0, 0))
+                        with Daemon(self) as daemon:
+                            daemon.check(root, (0, 0, 0, 0))
                             args = ["rebase", "main"]
                             if reset_author_date:
                                 args.append("--reset-author-date")
-                            git(*args)
-                            self.assertEqual(git("status", "--porcelain"), "")
-                            self.assertEqual(counts(), (0, 0, 0, 0))
-                            self.assertEqual(counts(), (0, 0, 0, 0))
+                            git(root, *args)
+                            self.assertEqual(git(root, "status", "--porcelain"), "")
+                            daemon.check(root, (0, 0, 0, 0))
+                            daemon.check(root, (0, 0, 0, 0))
 
                             # The refreshed index must still detect real changes, not just go clean.
                             (directory / "new_0.txt").write_text("staged\n")
-                            git("add", ".")
+                            git(root, "add", ".")
                             (directory / "new_1.txt").write_text("unstaged\n")
                             (directory / "untracked.txt").write_text("untracked\n")
-                            self.assertEqual(counts(), (1, 1, 0, 1))
-                        finally:
-                            daemon.stdin.close()
-                            try:
-                                daemon.wait(timeout=10)
-                            except subprocess.TimeoutExpired:
-                                daemon.kill()
-                                daemon.wait()
-                                raise
-                            finally:
-                                daemon.stdout.close()
-                        self.assertEqual(daemon.returncode, 0)
+                            daemon.check(root, (1, 1, 0, 1))
+
+
+class SubmoduleTest(unittest.TestCase):
+    def test_head_changes(self):
+        with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
+            upstream = Path(temporary) / "upstream"
+            root = Path(temporary) / "root"
+            upstream.mkdir()
+            root.mkdir()
+            init(upstream)
+            for i in range(2):
+                (upstream / "file.txt").write_text(f"{i}\n")
+                git(upstream, "add", ".")
+                git(upstream, "commit", "-m", str(i))
+            init(root)
+            git(root, "submodule", "add", upstream.as_posix(), "sub")
+            git(root, "commit", "-m", "add sub")
+            sub = root / "sub"
+
+            with Daemon(self) as daemon:
+                daemon.check(root, (0, 0, 0, 0))
+                # Changes to the submodule's HEAD show without reopening it.
+                git(sub, "checkout", "-q", "HEAD~1")
+                daemon.check(root, (0, 1, 0, 0))
+                git(sub, "checkout", "-q", "main")
+                daemon.check(root, (0, 0, 0, 0))
+
+                # Replacing .git with a file pointing to a different directory.
+                git(root, "submodule", "absorbgitdirs")
+                self.assertTrue((sub / ".git").is_file())
+                daemon.check(root, (0, 0, 0, 0))
+                git(sub, "checkout", "-q", "HEAD~1")
+                daemon.check(root, (0, 1, 0, 0))
+
+                # A fresh clone in place of the submodule.
+                rmtree(sub)
+                daemon.check(root, (0, 1, 0, 0))
+                git(root, "clone", "-q", upstream.as_posix(), "sub")
+                daemon.check(root, (0, 0, 0, 0))
+                git(sub, "checkout", "-q", "HEAD~1")
+                daemon.check(root, (0, 1, 0, 0))
 
 
 if __name__ == "__main__":

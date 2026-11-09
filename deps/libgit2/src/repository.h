@@ -156,6 +156,10 @@ struct git_repository {
 
 	git_configmap_value configmap_cache[GIT_CONFIGMAP_CACHE_MAX];
 	git_strmap *submodule_cache;
+
+	/* Open submodule repositories by path, reused to read their HEAD; see submodule.c. */
+	git_mutex submodule_wd_repos_lock;
+	git_strmap *submodule_wd_repos;
 };
 
 GIT_INLINE(git_attr_cache *) git_repository_attr_cache(git_repository *repo)
