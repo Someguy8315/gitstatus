@@ -35,7 +35,7 @@ index 70f51a89b..d912c3ebf 100644
  
  /**
 diff --git a/include/git2/diff.h b/include/git2/diff.h
-index b12e8ab27..b7f8f08da 100644
+index b12e8ab27..6941f8807 100644
 --- a/include/git2/diff.h
 +++ b/include/git2/diff.h
 @@ -170,7 +170,10 @@ typedef enum {
@@ -63,7 +63,7 @@ index b12e8ab27..b7f8f08da 100644
  typedef int GIT_CALLBACK(git_diff_notify_cb)(
  	const git_diff *diff_so_far,
  	const git_diff_delta *delta_to_add,
-@@ -468,6 +477,10 @@ typedef struct {
+@@ -468,10 +477,14 @@ typedef struct {
  	 * Defaults to "b".
  	 */
  	const char *new_prefix;
@@ -74,6 +74,11 @@ index b12e8ab27..b7f8f08da 100644
  } git_diff_options;
  
  /** The current version of the diff options structure */
+-#define GIT_DIFF_OPTIONS_VERSION 1
++#define GIT_DIFF_OPTIONS_VERSION 2
+ 
+ /** Stack initializer for diff options.  Alternatively use
+  * `git_diff_options_init` programmatic initialization.
 diff --git a/include/git2/index.h b/include/git2/index.h
 index 9ff244204..622c163fa 100644
 --- a/include/git2/index.h
@@ -530,8 +535,229 @@ index 654145e34..ae9625df4 100644
  	return error;
  }
 -
+diff --git a/src/libgit2/ignore.c b/src/libgit2/ignore.c
+index 13a67343f..bcd7ef759 100644
+--- a/src/libgit2/ignore.c
++++ b/src/libgit2/ignore.c
+@@ -19,154 +19,6 @@
+ 
+ #define GIT_IGNORE_DEFAULT_RULES ".\n..\n.git\n"
+ 
+-/**
+- * A negative ignore pattern can negate a positive one without
+- * wildcards if it is a basename only and equals the basename of
+- * the positive pattern. Thus
+- *
+- * foo/bar
+- * !bar
+- *
+- * would result in foo/bar being unignored again while
+- *
+- * moo/foo/bar
+- * !foo/bar
+- *
+- * would do nothing. The reverse also holds true: a positive
+- * basename pattern can be negated by unignoring the basename in
+- * subdirectories. Thus
+- *
+- * bar
+- * !foo/bar
+- *
+- * would result in foo/bar being unignored again. As with the
+- * first case,
+- *
+- * foo/bar
+- * !moo/foo/bar
+- *
+- * would do nothing, again.
+- */
+-static int does_negate_pattern(git_attr_fnmatch *rule, git_attr_fnmatch *neg)
+-{
+-	int (*cmp)(const char *, const char *, size_t);
+-	git_attr_fnmatch *longer, *shorter;
+-	char *p;
+-
+-	if ((rule->flags & GIT_ATTR_FNMATCH_NEGATIVE) != 0
+-	    || (neg->flags & GIT_ATTR_FNMATCH_NEGATIVE) == 0)
+-		return false;
+-
+-	if (neg->flags & GIT_ATTR_FNMATCH_ICASE)
+-		cmp = git__strncasecmp;
+-	else
+-		cmp = git__strncmp;
+-
+-	/* If lengths match we need to have an exact match */
+-	if (rule->length == neg->length) {
+-		return cmp(rule->pattern, neg->pattern, rule->length) == 0;
+-	} else if (rule->length < neg->length) {
+-		shorter = rule;
+-		longer = neg;
+-	} else {
+-		shorter = neg;
+-		longer = rule;
+-	}
+-
+-	/* Otherwise, we need to check if the shorter
+-	 * rule is a basename only (that is, it contains
+-	 * no path separator) and, if so, if it
+-	 * matches the tail of the longer rule */
+-	p = longer->pattern + longer->length - shorter->length;
+-
+-	if (p[-1] != '/')
+-		return false;
+-	if (memchr(shorter->pattern, '/', shorter->length) != NULL)
+-		return false;
+-
+-	return cmp(p, shorter->pattern, shorter->length) == 0;
+-}
+-
+-/**
+- * A negative ignore can only unignore a file which is given explicitly before, thus
+- *
+- *    foo
+- *    !foo/bar
+- *
+- * does not unignore 'foo/bar' as it's not in the list. However
+- *
+- *    foo/<star>
+- *    !foo/bar
+- *
+- * does unignore 'foo/bar', as it is contained within the 'foo/<star>' rule.
+- */
+-static int does_negate_rule(int *out, git_vector *rules, git_attr_fnmatch *match)
+-{
+-	int error = 0, wildmatch_flags, effective_flags;
+-	size_t i;
+-	git_attr_fnmatch *rule;
+-	char *path;
+-	git_str buf = GIT_STR_INIT;
+-
+-	*out = 0;
+-
+-	wildmatch_flags = WM_PATHNAME;
+-	if (match->flags & GIT_ATTR_FNMATCH_ICASE)
+-		wildmatch_flags |= WM_CASEFOLD;
+-
+-	/* path of the file relative to the workdir, so we match the rules in subdirs */
+-	if (match->containing_dir) {
+-		git_str_puts(&buf, match->containing_dir);
+-	}
+-	if (git_str_puts(&buf, match->pattern) < 0)
+-		return -1;
+-
+-	path = git_str_detach(&buf);
+-
+-	git_vector_foreach(rules, i, rule) {
+-		if (!(rule->flags & GIT_ATTR_FNMATCH_HASWILD)) {
+-			if (does_negate_pattern(rule, match)) {
+-				error = 0;
+-				*out = 1;
+-				goto out;
+-			}
+-			else
+-				continue;
+-		}
+-
+-		git_str_clear(&buf);
+-		if (rule->containing_dir)
+-			git_str_puts(&buf, rule->containing_dir);
+-		git_str_puts(&buf, rule->pattern);
+-
+-		if (git_str_oom(&buf))
+-			goto out;
+-
+-		/*
+-		 * if rule isn't for full path we match without PATHNAME flag
+-		 * as lines like *.txt should match something like dir/test.txt
+-		 * requiring * to also match /
+-		 */
+-		effective_flags = wildmatch_flags;
+-		if (!(rule->flags & GIT_ATTR_FNMATCH_FULLPATH))
+-			effective_flags &= ~WM_PATHNAME;
+-
+-		/* if we found a match, we want to keep this rule */
+-		if ((wildmatch(git_str_cstr(&buf), path, effective_flags)) == WM_MATCH) {
+-			*out = 1;
+-			error = 0;
+-			goto out;
+-		}
+-	}
+-
+-	error = 0;
+-
+-out:
+-	git__free(path);
+-	git_str_dispose(&buf);
+-	return error;
+-}
+-
+ static int parse_ignore_file(
+ 	git_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)
+ {
+@@ -192,8 +44,6 @@ static int parse_ignore_file(
+ 	}
+ 
+ 	while (!error && *scan) {
+-		int valid_rule = 1;
+-
+ 		if (!match && !(match = git__calloc(1, sizeof(*match)))) {
+ 			error = -1;
+ 			break;
+@@ -212,21 +62,11 @@ static int parse_ignore_file(
+ 
+ 			scan = git__next_line(scan);
+ 
+-			/*
+-			 * If a negative match doesn't actually do anything,
+-			 * throw it away. As we cannot always verify whether a
+-			 * rule containing wildcards negates another rule, we
+-			 * do not optimize away these rules, though.
+-			 * */
+-			if (match->flags & GIT_ATTR_FNMATCH_NEGATIVE
+-			    && !(match->flags & GIT_ATTR_FNMATCH_HASWILD))
+-				error = does_negate_rule(&valid_rule, &attrs->rules, match);
+-
+-			if (!error && valid_rule)
+-				error = git_vector_insert(&attrs->rules, match);
++			/* A negation can override a rule in a parent .gitignore. */
++			error = git_vector_insert(&attrs->rules, match);
+ 		}
+ 
+-		if (error != 0 || !valid_rule) {
++		if (error != 0) {
+ 			match->pattern = NULL;
+ 
+ 			if (error == GIT_ENOTFOUND)
+@@ -272,6 +112,13 @@ static int push_one_ignore(void *payload, const char *path)
+ 	return push_ignore_file(ign, &ign->ign_path, path, GIT_IGNORE_FILE);
+ }
+ 
++static int parse_ignore_default_rules(
++	git_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)
++{
++	GIT_UNUSED(data);
++	return parse_ignore_file(repo, attrs, GIT_IGNORE_DEFAULT_RULES, allow_macros);
++}
++
+ static int get_internal_ignores(git_attr_file **out, git_repository *repo)
+ {
+ 	git_attr_file_source source = { GIT_ATTR_FILE_SOURCE_MEMORY, NULL, GIT_IGNORE_INTERNAL };
+@@ -280,11 +127,8 @@ static int get_internal_ignores(git_attr_file **out, git_repository *repo)
+ 	if ((error = git_attr_cache__init(repo)) < 0)
+ 		return error;
+ 
+-	error = git_attr_cache__get(out, repo, NULL, &source, NULL, false);
+-
+-	/* if internal rules list is empty, insert default rules */
+-	if (!error && !(*out)->rules.length)
+-		error = parse_ignore_file(repo, *out, GIT_IGNORE_DEFAULT_RULES, false);
++	/* Initialize rules under the cache lock, before publishing the file. */
++	error = git_attr_cache__get(out, repo, NULL, &source, parse_ignore_default_rules, false);
+ 
+ 	return error;
+ }
 diff --git a/src/libgit2/index.c b/src/libgit2/index.c
-index 9b0c746ca..70b340ac1 100644
+index 9b0c746ca..e08e43e48 100644
 --- a/src/libgit2/index.c
 +++ b/src/libgit2/index.c
 @@ -121,6 +121,8 @@ struct reuc_entry_internal {
@@ -543,17 +769,17 @@ index 9b0c746ca..70b340ac1 100644
  
  /* local declarations */
  static int read_extension(size_t *read_len, git_index *index, size_t checksum_size, const char *buffer, size_t buffer_size);
-@@ -662,11 +664,19 @@ static int compare_checksum(git_index *index)
- }
+@@ -663,10 +665,18 @@ static int compare_checksum(git_index *index)
  
  int git_index_read(git_index *index, int force)
-+{
+ {
+-	int error = 0, updated;
 +	return git_index_read_ex(index, force, NULL);
 +}
 +
 +int git_index_read_ex(git_index *index, int force, int *read)
- {
- 	int error = 0, updated;
++{
++	int error = 0, updated, checksum_updated;
  	git_str buffer = GIT_STR_INIT;
  	git_futils_filestamp stamp = index->stamp;
  
@@ -563,21 +789,41 @@ index 9b0c746ca..70b340ac1 100644
  	if (!index->index_file_path)
  		return create_index_error(-1,
  			"failed to read index: The index is in-memory only");
-@@ -674,8 +684,12 @@ int git_index_read(git_index *index, int force)
+@@ -674,29 +684,37 @@ int git_index_read(git_index *index, int force)
  	index->on_disk = git_fs_path_exists(index->index_file_path);
  
  	if (!index->on_disk) {
 -		if (force && (error = git_index_clear(index)) < 0)
+-			return error;
 +		if (force) {
 +			if ((error = git_index_clear(index)) < 0)
- 			return error;
++				return error;
 +			if (read)
 +				*read = 1;
 +		}
  
  		index->dirty = 0;
  		return 0;
-@@ -697,6 +711,9 @@ int git_index_read(git_index *index, int force)
+ 	}
+ 
+-	if ((updated = git_futils_filestamp_check(&stamp, index->index_file_path) < 0) ||
+-	    ((updated = compare_checksum(index)) < 0)) {
++	if ((updated = git_futils_filestamp_check(&stamp, index->index_file_path)) < 0 ||
++	    (checksum_updated = compare_checksum(index)) < 0) {
+ 		git_error_set(
+ 			GIT_ERROR_INDEX,
+ 			"failed to read index: '%s' no longer exists",
+ 			index->index_file_path);
+-		return updated;
++		return -1;
+ 	}
+ 
+-	if (!updated && !force)
++	/* index.skipHash writes a zero footer, so also compare the file stamp. */
++	if (!updated && !checksum_updated && !force)
+ 		return 0;
+ 
+ 	error = git_futils_readbuffer(&buffer, index->index_file_path);
  	if (error < 0)
  		return error;
  
@@ -587,7 +833,7 @@ index 9b0c746ca..70b340ac1 100644
  	index->tree = NULL;
  	git_pool_clear(&index->tree_pool);
  
-@@ -954,7 +971,8 @@ static int index_entry_create(
+@@ -954,7 +972,8 @@ static int index_entry_create(
  	if (st)
  		mode = st->st_mode;
  
@@ -597,17 +843,19 @@ index 9b0c746ca..70b340ac1 100644
  		git_error_set(GIT_ERROR_INDEX, "invalid path: '%s'", path);
  		return -1;
  	}
-@@ -2757,7 +2775,8 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
+@@ -2757,8 +2776,9 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
  	 * Precalculate the hash of the files's contents -- we'll match
  	 * it to the provided checksum in the footer.
  	 */
 -	git_hash_buf(checksum, buffer, buffer_size - checksum_size,
+-		git_oid_algorithm(index->oid_type));
 +	if (!git_index__disable_checksum_verification)
 +		git_hash_buf(checksum, buffer, buffer_size - checksum_size,
- 		git_oid_algorithm(index->oid_type));
++			git_oid_algorithm(index->oid_type));
  
  	/* Parse header */
-@@ -2830,14 +2849,15 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
+ 	if ((error = read_header(&header, buffer)) < 0)
+@@ -2830,14 +2850,15 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
  	 * Note: checksum may be 0 if the index was written by a client
  	 * where index.skipHash was set to true.
  	 */
@@ -625,7 +873,7 @@ index 9b0c746ca..70b340ac1 100644
  
  #undef seek_forward
  
-@@ -3813,30 +3833,31 @@ int git_index_update_all(
+@@ -3813,30 +3834,31 @@ int git_index_update_all(
  
  int git_index_snapshot_new(git_vector *snap, git_index *index)
  {
@@ -637,12 +885,12 @@ index 9b0c746ca..70b340ac1 100644
  	git_vector_sort(&index->entries);
  
 -	error = git_vector_dup(snap, &index->entries, index->entries._cmp);
+-
+-	if (error < 0)
+-		git_index_snapshot_release(snap, index);
 +	/* gitstatusd never mutates the index while readers are active. */
 +	*snap = index->entries;
  
--	if (error < 0)
--		git_index_snapshot_release(snap, index);
--
 -	return error;
 +	return 0;
  }
@@ -692,10 +940,92 @@ index de8a9cf38..19e65efd6 100644
  #endif
  
 diff --git a/src/libgit2/iterator.c b/src/libgit2/iterator.c
-index 5b3e02485..79526ac9f 100644
+index 5b3e02485..7303f7240 100644
 --- a/src/libgit2/iterator.c
 +++ b/src/libgit2/iterator.c
-@@ -1186,6 +1186,7 @@ static void filesystem_iterator_frame_pop_ignores(
+@@ -9,6 +9,10 @@
+ 
+ #include "tree.h"
+ #include "index.h"
++
++#ifndef GIT_WIN32
++#include <dirent.h>
++#endif
+ #include "path.h"
+ 
+ #define GIT_ITERATOR_FIRST_ACCESS   (1 << 15)
+@@ -1019,6 +1023,7 @@ typedef struct {
+ 	size_t path_len;
+ 	iterator_pathlist_search_t match;
+ 	git_oid id;
++	const char *basename;
+ 	char path[GIT_FLEX_ARRAY];
+ } filesystem_iterator_entry;
+ 
+@@ -1082,7 +1087,7 @@ static int filesystem_iterator_entry_cmp(const void *_a, const void *_b)
+ 	const filesystem_iterator_entry *a = (const filesystem_iterator_entry *)_a;
+ 	const filesystem_iterator_entry *b = (const filesystem_iterator_entry *)_b;
+ 
+-	return git__strcmp(a->path, b->path);
++	return git__strcmp(a->basename, b->basename);
+ }
+ 
+ static int filesystem_iterator_entry_cmp_icase(const void *_a, const void *_b)
+@@ -1090,10 +1095,10 @@ static int filesystem_iterator_entry_cmp_icase(const void *_a, const void *_b)
+ 	const filesystem_iterator_entry *a = (const filesystem_iterator_entry *)_a;
+ 	const filesystem_iterator_entry *b = (const filesystem_iterator_entry *)_b;
+ 
+-	return git__strcasecmp(a->path, b->path);
++	return git__strcasecmp(a->basename, b->basename);
+ }
+ 
+-#define FILESYSTEM_MAX_DEPTH 100
++#define FILESYSTEM_MAX_DEPTH 2049
+ 
+ /**
+  * Figure out if an entry is a submodule.
+@@ -1145,14 +1150,10 @@ static int filesystem_iterator_is_submodule(
+ 
+ static void filesystem_iterator_frame_push_ignores(
+ 	filesystem_iterator *iter,
+-	filesystem_iterator_entry *frame_entry,
++	filesystem_iterator_frame *previous_frame,
+ 	filesystem_iterator_frame *new_frame)
+ {
+-	filesystem_iterator_frame *previous_frame;
+-	const char *path = frame_entry ? frame_entry->path : "";
+-
+-	if (!iterator__honor_ignores(&iter->base))
+-		return;
++	const char *path = previous_frame ? filesystem_iterator_current_entry(previous_frame)->path : "";
+ 
+ 	if (git_ignore__lookup(&new_frame->is_ignored,
+ 			&iter->ignores, path, GIT_DIR_FLAG_TRUE) < 0) {
+@@ -1161,13 +1162,11 @@ static void filesystem_iterator_frame_push_ignores(
+ 	}
+ 
+ 	/* if this is not the top level directory... */
+-	if (frame_entry) {
++	if (previous_frame) {
+ 		const char *relative_path;
+ 
+-		previous_frame = filesystem_iterator_parent_frame(iter);
+-
+ 		/* push new ignores for files in this directory */
+-		relative_path = frame_entry->path + previous_frame->path_len;
++		relative_path = path + previous_frame->path_len;
+ 
+ 		/* inherit ignored from parent if no rule specified */
+ 		if (new_frame->is_ignored <= GIT_IGNORE_NOTFOUND)
+@@ -1180,12 +1179,14 @@ static void filesystem_iterator_frame_push_ignores(
+ static void filesystem_iterator_frame_pop_ignores(
+ 	filesystem_iterator *iter)
+ {
+-	if (iterator__honor_ignores(&iter->base))
++	if (iterator__honor_ignores(&iter->base) &&
++	    (size_t)iter->ignores.depth == iter->frames.size + 1)
+ 		git_ignore__pop_dir(&iter->ignores);
+ }
  
  GIT_INLINE(bool) filesystem_iterator_examine_path(
  	bool *is_dir_out,
@@ -718,7 +1048,41 @@ index 5b3e02485..79526ac9f 100644
  		}
  
  		if (cmp < 0)
-@@ -1421,7 +1426,7 @@ static int filesystem_iterator_frame_push(
+@@ -1323,6 +1328,7 @@ static int filesystem_iterator_entry_init(
+ 	entry->path_len = path_len;
+ 	entry->match = pathlist_match;
+ 	memcpy(entry->path, path, path_len);
++	entry->basename = entry->path + frame->path_len;
+ 	memcpy(&entry->st, statbuf, sizeof(struct stat));
+ 
+ 	/* Suffix directory paths with a '/' */
+@@ -1363,6 +1369,7 @@ static int filesystem_iterator_frame_push(
+ 	GIT_ERROR_CHECK_ALLOC(new_frame);
+ 
+ 	memset(new_frame, 0, sizeof(filesystem_iterator_frame));
++	new_frame->is_ignored = GIT_IGNORE_UNCHECKED;
+ 
+ 	if (frame_entry)
+ 		git_str_joinpath(&root, iter->root, frame_entry->path);
+@@ -1393,8 +1400,7 @@ static int filesystem_iterator_frame_push(
+ 	if ((error = git_pool_init(&new_frame->entry_pool, 1)) < 0)
+ 		goto done;
+ 
+-	/* check if this directory is ignored */
+-	filesystem_iterator_frame_push_ignores(iter, frame_entry, new_frame);
++	/* Defer loading ignore files until a caller actually checks an untracked path. */
+ 
+ 	while ((error = git_fs_path_diriter_next(&diriter)) == 0) {
+ 		iterator_pathlist_search_t pathlist_match = ITERATOR_PATHLIST_FULL;
+@@ -1416,12 +1422,15 @@ static int filesystem_iterator_frame_push(
+ 		path += iter->root_len;
+ 		path_len -= iter->root_len;
+ 
++		if (filesystem_iterator_is_dot_git(iter, path, path_len))
++			continue;
++
+ 		/* examine start / end and the pathlist to see if this path is in it.
+ 		 * note that since we haven't yet stat'ed the path, we cannot know
  		 * whether it's a directory yet or not, so this can give us an
  		 * expected type (S_IFDIR or S_IFREG) that we should examine)
  		 */
@@ -727,7 +1091,50 @@ index 5b3e02485..79526ac9f 100644
  			iter, frame_entry, path, path_len))
  			continue;
  
-@@ -2052,6 +2057,7 @@ typedef struct {
+@@ -1429,6 +1438,13 @@ static int filesystem_iterator_frame_push(
+ 		 * we have an index, we can just copy the data out of it.
+ 		 */
+ 
++#ifndef GIT_WIN32
++		if (diriter.d_type == DT_DIR) {
++			/* The index still decides whether a directory is a submodule below. */
++			memset(&statbuf, 0, sizeof(statbuf));
++			statbuf.st_mode = S_IFDIR;
++		} else
++#endif
+ 		if ((error = git_fs_path_diriter_stat(&statbuf, &diriter)) < 0) {
+ 			/* file was removed between readdir and lstat */
+ 			if (error == GIT_ENOTFOUND)
+@@ -1450,9 +1466,6 @@ static int filesystem_iterator_frame_push(
+ 			statbuf.st_mode != GIT_FILEMODE_UNREADABLE)
+ 			continue;
+ 
+-		if (filesystem_iterator_is_dot_git(iter, path, path_len))
+-			continue;
+-
+ 		/* convert submodules to GITLINK and remove trailing slashes */
+ 		if (S_ISDIR(statbuf.st_mode)) {
+ 			bool submodule = false;
+@@ -1725,9 +1738,18 @@ GIT_INLINE(git_dir_flag) entry_dir_flag(git_index_entry *entry)
+ 
+ static void filesystem_iterator_update_ignored(filesystem_iterator *iter)
+ {
++	size_t i;
+ 	filesystem_iterator_frame *frame;
+ 	git_dir_flag dir_flag = entry_dir_flag(&iter->entry);
+ 
++	/* Load only the as-yet-unexamined suffix of the directory stack. */
++	for (i = iter->frames.size;
++	     i && iter->frames.ptr[i - 1].is_ignored == GIT_IGNORE_UNCHECKED; --i) {}
++	for (; i < iter->frames.size; ++i) {
++		frame = iter->frames.ptr + i;
++		filesystem_iterator_frame_push_ignores(iter, i ? frame - 1 : NULL, frame);
++	}
++
+ 	if (git_ignore__lookup(&iter->current_is_ignored,
+ 			&iter->ignores, iter->entry.path, dir_flag) < 0) {
+ 		git_error_clear();
+@@ -2052,6 +2074,7 @@ typedef struct {
  	git_iterator base;
  	git_vector entries;
  	size_t next_idx;
@@ -735,7 +1142,29 @@ index 5b3e02485..79526ac9f 100644
  
  	/* the pseudotree entry */
  	git_index_entry tree_entry;
-@@ -2260,6 +2266,8 @@ static void index_iterator_free(git_iterator *i)
+@@ -2242,9 +2265,21 @@ static void index_iterator_clear(index_iterator *iter)
+ 
+ static int index_iterator_init(index_iterator *iter)
+ {
++	git_index_entry key = {0};
++	git_str start = GIT_STR_INIT;
+ 	iter->base.flags &= ~GIT_ITERATOR_FIRST_ACCESS;
+ 	iter->next_idx = 0;
+ 	iter->skip_tree = false;
++	/* Each diff shard starts in O(log N), rather than rescanning the index. */
++	if (iter->base.start_len && !iterator__include_trees(&iter->base)) {
++		if (git_str_put(&start, iter->base.start, iter->base.start_len) < 0)
++			return -1;
++		if (start.ptr[start.size - 1] == '/')
++			git_str_truncate(&start, start.size - 1);
++		key.path = start.ptr;
++		git_vector_bsearch(&iter->next_idx, &iter->entries, &key);
++		git_str_dispose(&start);
++	}
+ 	return 0;
+ }
+ 
+@@ -2260,6 +2295,8 @@ static void index_iterator_free(git_iterator *i)
  {
  	index_iterator *iter = GIT_CONTAINER_OF(i, index_iterator, base);
  
@@ -744,7 +1173,7 @@ index 5b3e02485..79526ac9f 100644
  	git_index_snapshot_release(&iter->entries, iter->base.index);
  	git_str_dispose(&iter->tree_buf);
  }
-@@ -2271,6 +2279,8 @@ int git_iterator_for_index(
+@@ -2271,6 +2308,8 @@ int git_iterator_for_index(
  	git_iterator_options *options)
  {
  	index_iterator *iter;
@@ -753,12 +1182,18 @@ index 5b3e02485..79526ac9f 100644
  	int error;
  
  	static git_iterator_callbacks callbacks = {
-@@ -2298,9 +2308,15 @@ int git_iterator_for_index(
- 		(error = index_iterator_init(iter)) < 0)
+@@ -2294,13 +2333,20 @@ int git_iterator_for_index(
+ 	iter->base.cb = &callbacks;
+ 
+ 	if ((error = iterator_init_common(&iter->base, repo, index, options)) < 0 ||
+-		(error = git_index_snapshot_new(&iter->entries, index)) < 0 ||
+-		(error = index_iterator_init(iter)) < 0)
++		(error = git_index_snapshot_new(&iter->entries, index)) < 0)
  		goto on_error;
  
 -	git_vector_set_cmp(&iter->entries, iterator__ignore_case(&iter->base) ?
 -		git_index_entry_icmp : git_index_entry_cmp);
+-	git_vector_sort(&iter->entries);
 +	cmp = iterator__ignore_case(&iter->base) ?
 +		git_index_entry_icmp : git_index_entry_cmp;
 +	if (cmp != iter->entries._cmp) {
@@ -766,8 +1201,10 @@ index 5b3e02485..79526ac9f 100644
 +			goto on_error;
 +		iter->entries = entries;
 +		iter->owns_entries = true;
- 	git_vector_sort(&iter->entries);
++		git_vector_sort(&iter->entries);
 +	}
++	if ((error = index_iterator_init(iter)) < 0)
++		goto on_error;
  
  	*out = &iter->base;
  	return 0;
@@ -947,3 +1384,120 @@ index 7e7ff615a..daef1124e 100644
  	case GIT_OPT_SET_PACK_MAX_OBJECTS:
  		git_indexer__max_objects = va_arg(ap, size_t);
  		break;
+diff --git a/src/libgit2/streams/socket.c b/src/libgit2/streams/socket.c
+index d064f867e..fbc8ca4c5 100644
+--- a/src/libgit2/streams/socket.c
++++ b/src/libgit2/streams/socket.c
+@@ -182,10 +182,11 @@ static int socket_connect(git_stream *stream)
+ 	hints.ai_socktype = SOCK_STREAM;
+ 	hints.ai_family = AF_UNSPEC;
+ 
+-	if ((error = p_getaddrinfo(st->host, st->port, &hints, &info)) != 0) {
++	/* gitstatusd never connects to remotes; avoid glibc NSS dependencies. */
++	error = GIT_ENOTFOUND;
++	if (error != 0) {
+ 		git_error_set(GIT_ERROR_NET,
+-			   "failed to resolve address for %s: %s",
+-			   st->host, p_gai_strerror(error));
++			   "network access is disabled in gitstatusd: %s", st->host);
+ 		return -1;
+ 	}
+ 
+diff --git a/src/libgit2/sysdir.c b/src/libgit2/sysdir.c
+index 7838a6789..681e1aa9b 100644
+--- a/src/libgit2/sysdir.c
++++ b/src/libgit2/sysdir.c
+@@ -286,38 +286,10 @@ static int git_sysdir_guess_system_dirs(git_str *out)
+ #ifndef GIT_WIN32
+ static int get_passwd_home(git_str *out, uid_t uid)
+ {
+-	struct passwd pwd, *pwdptr;
+-	char *buf = NULL;
+-	long buflen;
+-	int error;
+-
+-	GIT_ASSERT_ARG(out);
+-
+-	if ((buflen = sysconf(_SC_GETPW_R_SIZE_MAX)) == -1)
+-		buflen = 1024;
+-
+-	do {
+-		buf = git__realloc(buf, buflen);
+-		error = getpwuid_r(uid, &pwd, buf, buflen, &pwdptr);
+-		buflen *= 2;
+-	} while (error == ERANGE && buflen <= 8192);
+-
+-	if (error) {
+-		git_error_set(GIT_ERROR_OS, "failed to get passwd entry");
+-		goto out;
+-	}
+-
+-	if (!pwdptr) {
+-		git_error_set(GIT_ERROR_OS, "no passwd entry found for user");
+-		goto out;
+-	}
+-
+-	if ((error = git_str_puts(out, pwdptr->pw_dir)) < 0)
+-		goto out;
+-
+-out:
+-	git__free(buf);
+-	return error;
++	/* gitstatusd uses HOME and must not load glibc NSS modules. */
++	GIT_UNUSED(out);
++	GIT_UNUSED(uid);
++	return GIT_ENOTFOUND;
+ }
+ #endif
+ 
+diff --git a/src/util/fs_path.c b/src/util/fs_path.c
+index 5b00b1b40..7428e66f8 100644
+--- a/src/util/fs_path.c
++++ b/src/util/fs_path.c
+@@ -17,6 +17,7 @@
+ #include "win32/version.h"
+ #include <aclapi.h>
+ #else
++#include <fcntl.h>
+ #include <dirent.h>
+ #endif
+ #include <stdio.h>
+@@ -1461,6 +1462,7 @@ int git_fs_path_diriter_next(git_fs_path_diriter *diriter)
+ 	} while (skip_dot && git_fs_path_is_dot_or_dotdot(de->d_name));
+ 
+ 	filename = de->d_name;
++	diriter->d_type = de->d_type;
+ 	filename_len = strlen(filename);
+ 
+ #ifdef GIT_USE_ICONV
+@@ -1514,10 +1516,17 @@ int git_fs_path_diriter_fullpath(
+ 
+ int git_fs_path_diriter_stat(struct stat *out, git_fs_path_diriter *diriter)
+ {
++	const char *name;
+ 	GIT_ASSERT_ARG(out);
+ 	GIT_ASSERT_ARG(diriter);
+ 
+-	return git_fs_path_lstat(diriter->path.ptr, out);
++	/* Use the open directory to avoid resolving the full prefix for every file. */
++	name = diriter->path.ptr + diriter->parent_len;
++	if (*name == '/')
++		name++;
++	if (fstatat(dirfd(diriter->dir), name, out, AT_SYMLINK_NOFOLLOW) < 0)
++		return git_fs_path_set_error(errno, diriter->path.ptr, "stat");
++	return 0;
+ }
+ 
+ void git_fs_path_diriter_free(git_fs_path_diriter *diriter)
+diff --git a/src/util/fs_path.h b/src/util/fs_path.h
+index cafee64f7..8c62d601a 100644
+--- a/src/util/fs_path.h
++++ b/src/util/fs_path.h
+@@ -512,6 +512,7 @@ struct git_fs_path_diriter
+ {
+ 	git_str path;
+ 	size_t parent_len;
++	unsigned char d_type;
+ 
+ 	unsigned int flags;
+ 

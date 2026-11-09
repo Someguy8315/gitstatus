@@ -54,6 +54,13 @@ for (const threads of [1, 8]) {
       rmSync(root, { recursive: true, force: true });
     });
     let serial = 0;
+    const oneShot = (args = [], dir = repo) => {
+      const output = execFileSync(binary, ['-t', String(threads), ...args], {
+        env, input: `once\x1f${dir}\x1e`, encoding: 'utf8', timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).replace(/\x1e$/, '').split('\x1f');
+      return Object.fromEntries(fields.map((name, i) => [name, output[i]]));
+    };
     const query = async (dir = repo, expected = {}) => {
       const id = String(++serial);
       const response = await new Promise((resolve, reject) => {
@@ -96,6 +103,15 @@ for (const threads of [1, 8]) {
     await query(repo, { remote: 'origin', remoteBranch: 'main', ahead: 1, behind: 0, pushRemote: 'origin', pushAhead: 1 });
     git('config', 'remote.origin.url', 'https://example.com/changed.git');
     await query(repo, { remoteUrl: 'https://example.com/changed.git', pushUrl: 'https://example.com/changed.git' });
+    git('config', '--unset', 'branch.main.pushRemote');
+    git('config', 'remote.pushDefault', 'origin');
+    await query(repo, { pushRemote: 'origin', pushAhead: 1 });
+    git('config', 'branch.main.remote', '.');
+    git('config', 'branch.main.pushRemote', '.');
+    await query(repo, { remote: '.', remoteBranch: 'main', remoteUrl: '', ahead: 0, behind: 0,
+      pushRemote: '.', pushUrl: '', pushAhead: 0, pushBehind: 0 });
+    git('config', 'branch.main.remote', 'origin');
+    git('config', '--unset', 'branch.main.pushRemote');
 
     put('.gitignore', '*.ignored\n!keep.ignored\n');
     git('add', '.gitignore');
@@ -108,6 +124,42 @@ for (const threads of [1, 8]) {
     git('config', 'status.showUntrackedFiles', 'true');
     await query(repo, { untracked: 1 });
     rmSync(join(repo, 'keep.ignored'));
+
+    mkdirSync(join(repo, 'nested'));
+    put('nested/.gitignore', '!unignored.ignored\n');
+    git('add', 'nested/.gitignore');
+    git('commit', '-m', 'nested ignores');
+    put('nested/unignored.ignored');
+    assert.equal(git('status', '--porcelain'), '?? nested/unignored.ignored');
+    await query(repo, { untracked: 1 });
+    rmSync(join(repo, 'nested/unignored.ignored'));
+    mkdirSync(join(repo, 'empty'));
+    mkdirSync(join(repo, 'ignored-only'));
+    put('ignored-only/drop.ignored');
+    await query(repo, { untracked: 0 });
+
+    // Notify callbacks must see final typechange classifications, not provisional deltas.
+    rmSync(join(repo, 'tracked'));
+    mkdirSync(join(repo, 'tracked'));
+    put('tracked/child');
+    await query(repo, { unstaged: 1, unstagedDeleted: 0, untracked: 0 });
+    rmSync(join(repo, 'tracked'), { recursive: true });
+    git('restore', 'tracked');
+    rmSync(join(repo, 'nested'), { recursive: true });
+    put('nested');
+    await query(repo, { unstaged: 1, unstagedDeleted: 1, untracked: 0 });
+    rmSync(join(repo, 'nested'));
+    git('restore', 'nested');
+
+    mkdirSync(join(repo, 'b'));
+    put('b/known');
+    put('b.c');
+    git('add', 'b', 'b.c');
+    git('commit', '-m', 'range boundary');
+    put('b/known', 'changed\n');
+    put('b.c', 'changed\n');
+    await query(repo, { unstaged: 2 });
+    git('restore', 'b', 'b.c');
 
     put('intent');
     git('add', '-N', 'intent');
@@ -138,6 +190,22 @@ for (const threads of [1, 8]) {
     const worktree = join(root, 'worktree');
     git('worktree', 'add', '-b', 'linked', worktree);
     await query(worktree, { ok: 1, branch: 'linked', workdir: worktree, staged: 0 });
+    await query(`:${join(worktree, '.git')}`, { ok: 1, branch: 'linked', workdir: worktree });
+    await query(`:${join(repo, '.git')}`, { ok: 1, branch: 'main', workdir: repo });
+
+    const child = join(root, 'child');
+    git('init', '-b', 'main', child);
+    writeFileSync(join(child, 'child-file'), 'child\n');
+    git('-C', child, 'add', '.');
+    git('-C', child, 'commit', '-m', 'child');
+    git('-c', 'protocol.file.allow=always', 'submodule', 'add', child, 'sub');
+    git('commit', '-m', 'submodule');
+    await query(repo, { staged: 0, unstaged: 0 });
+    await query(join(repo, 'sub'), { ok: 1, branch: 'main', workdir: join(repo, 'sub') });
+    await query(`:${join(repo, 'sub', '.git')}`, { ok: 1, branch: 'main', workdir: join(repo, 'sub') });
+    writeFileSync(join(repo, 'sub', 'child-file'), 'dirty child\n');
+    await query(repo, { unstaged: 0 }); // Submodule workdir dirt is intentionally ignored.
+    git('-C', join(repo, 'sub'), 'restore', 'child-file');
     const link = join(root, 'link');
     symlinkSync(repo, link);
     await query(link, { ok: 1, branch: 'main', staged: 0 });
@@ -152,7 +220,10 @@ for (const threads of [1, 8]) {
     }
     git('add', '.');
     git('commit', '-m', 'many files');
-    await query(repo, { staged: 0, unstaged: 0, untracked: 0 });
+    git('tag', '-a', 'parallel-tag', '-m', 'packed annotated tag');
+    git('pack-refs', '--all');
+    git('repack', '-ad');
+    await query(repo, { staged: 0, unstaged: 0, untracked: 0, tag: 'parallel-tag' });
     for (let d = 0; d < 4; ++d) {
       put(`dir${d}/100`, 'staged\n');
       git('add', `dir${d}/100`);
@@ -160,6 +231,12 @@ for (const threads of [1, 8]) {
       put(`dir${d}/untracked`);
     }
     for (let i = 0; i < 10; ++i) await query(repo, { staged: 4, unstaged: 4, untracked: 4 });
+    const limited = oneShot();
+    for (const key of ['staged', 'unstaged', 'untracked']) assert.equal(limited[key], '1', key);
+    git('config', 'core.ignoreCase', 'true');
+    const insensitive = oneShot(['-s', '-1', '-u', '-1', '-d', '-1']);
+    for (const key of ['staged', 'unstaged', 'untracked']) assert.equal(insensitive[key], '4', key);
+    git('config', 'core.ignoreCase', 'false');
     git('add', '.');
     git('commit', '-m', 'changes');
 
@@ -173,5 +250,25 @@ for (const threads of [1, 8]) {
     await query(repo, { action: 'merge', conflicted: 1 });
     git('merge', '--abort');
     await query(repo, { action: '', conflicted: 0, staged: 0, unstaged: 0 });
+
+    const shallow = join(root, 'shallow');
+    git('clone', '--no-local', '--depth=1', '--branch=main', repo, shallow);
+    await query(shallow, { ok: 1, branch: 'main', ahead: 0, behind: 0 });
+    git('-C', shallow, 'commit', '--allow-empty', '-m', 'shallow commit');
+    await query(shallow, { ahead: 1, behind: 0 });
+    // These repository extensions no longer need the old fork's allowlist patch.
+    git('-C', shallow, 'config', 'core.repositoryFormatVersion', '1');
+    git('-C', shallow, 'config', 'extensions.preciousObjects', 'true');
+    git('-C', shallow, 'config', 'extensions.noop', 'true');
+    assert.equal(oneShot([], shallow).ok, '1');
+
+    // A zero index checksum cannot identify index contents across requests.
+    git('config', 'index.skipHash', 'true');
+    put('skip-hash-1');
+    git('add', 'skip-hash-1');
+    await query(repo, { staged: 1, stagedNew: 1 });
+    put('skip-hash-2');
+    git('add', 'skip-hash-2');
+    await query(repo, { staged: 2, stagedNew: 2 });
   });
 }

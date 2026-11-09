@@ -45,7 +45,10 @@ pkg: zwc
 
 -include $(OBJS:.o=.dep)
 
-.PHONY: help
+.PHONY: help test
+
+test:
+	node --test tests/gitstatus.test.js
 
 help:
 	@echo "Usage: make [TARGET]"
@@ -55,3 +58,4 @@ help:
 	@echo "  zwc         Compile Zsh files"
 	@echo "  minify      Remove unnecessary files and folders"
 	@echo "  pkg         Create a package"
+	@echo "  test        Test usrbin/gitstatusd (run ./build -w first; requires Node.js)"
