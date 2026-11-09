@@ -477,7 +477,12 @@ size_t Index::InitDirs(git_index* index) {
 }
 
 void Index::InitSplits(size_t total_weight) {
+#ifdef _WIN32
+  // Listing a directory costs around 100us of CPU on Windows, so small batches spread it better.
+  constexpr size_t kMinShardWeight = 64;
+#else
   constexpr size_t kMinShardWeight = 512;
+#endif
   const size_t kNumShards = 16 * GlobalThreadPool()->num_threads();
   const size_t shard_weight = std::max(kMinShardWeight, total_weight / kNumShards);
 
