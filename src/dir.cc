@@ -67,13 +67,13 @@ bool Dots(const Char* name) {
 
 namespace {
 
-Stat ToStat(DWORD attrs, DWORD reparse_tag, FILETIME mtime, DWORD size_high, DWORD size_low) {
+Stat ToStat(DWORD attrs, DWORD reparse_tag, int64_t mtime, int64_t size) {
   // FILETIME counts 100ns intervals since 1601. Git for Windows converts it the same way.
-  int64_t t = (int64_t{mtime.dwHighDateTime} << 32 | mtime.dwLowDateTime) - 116444736000000000;
+  int64_t t = mtime - 116444736000000000;
   Stat st = {};
   st.st_mtim.tv_sec = t / 10000000;
   st.st_mtim.tv_nsec = t % 10000000 * 100;
-  st.st_size = int64_t{size_high} << 32 | size_low;
+  st.st_size = size;
   if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) && reparse_tag == IO_REPARSE_TAG_SYMLINK) {
     st.st_mode = S_IFLNK;
   } else if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
@@ -83,6 +83,8 @@ Stat ToStat(DWORD attrs, DWORD reparse_tag, FILETIME mtime, DWORD size_high, DWO
   }
   return st;
 }
+
+int64_t Int64(DWORD high, DWORD low) { return static_cast<int64_t>(uint64_t{high} << 32 | low); }
 
 }  // namespace
 
@@ -113,28 +115,37 @@ std::wstring WidePath(const char* path) {
 bool ListDir(const std::wstring& dir, Arena& arena, std::vector<char*>& entries,
              bool case_sensitive) {
   const size_t orig_size = entries.size();
-  WIN32_FIND_DATAW data;
-  HANDLE h = FindFirstFileExW((dir + L'*').c_str(), FindExInfoBasic, &data, FindExSearchNameMatch,
-                              nullptr, FIND_FIRST_EX_LARGE_FETCH);
+  HANDLE h = CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   if (h == INVALID_HANDLE_VALUE) return false;
-  ON_SCOPE_EXIT(&) { CHECK(FindClose(h)) << GetLastError(); };
+  ON_SCOPE_EXIT(&) { CHECK(CloseHandle(h)) << GetLastError(); };
 
-  do {
-    if (Dots(data.cFileName)) continue;
-    int wlen = static_cast<int>(std::wcslen(data.cFileName));
-    // Each UTF-16 code unit becomes at most 3 bytes of UTF-8.
-    int cap = 3 * wlen;
-    char* p = static_cast<char*>(arena.Allocate(sizeof(Stat) + 1 + cap + 1, alignof(Stat)));
-    Stat st = ToStat(data.dwFileAttributes, data.dwReserved0, data.ftLastWriteTime,
-                     data.nFileSizeHigh, data.nFileSizeLow);
-    std::memcpy(p, &st, sizeof(st));
-    char* name = p + sizeof(Stat) + 1;
-    int n = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, wlen, name, cap, nullptr, nullptr);
-    CHECK(n > 0) << GetLastError();
-    name[n] = 0;
-    name[-1] = S_ISDIR(st.st_mode) ? DT_DIR : S_ISLNK(st.st_mode) ? DT_LNK : DT_REG;
-    entries.push_back(name);
-  } while (FindNextFileW(h, &data));
+  alignas(8) static thread_local char buf[64 << 10];
+  while (GetFileInformationByHandleEx(h, FileFullDirectoryInfo, buf, sizeof(buf))) {
+    for (size_t pos = 0;;) {
+      const auto& data = *reinterpret_cast<const FILE_FULL_DIR_INFO*>(buf + pos);
+      const int wlen = static_cast<int>(data.FileNameLength / sizeof(wchar_t));
+      const wchar_t* wname = data.FileName;
+      if (!(wname[0] == L'.' && (wlen == 1 || (wlen == 2 && wname[1] == L'.')))) {
+        // Each UTF-16 code unit becomes at most 3 bytes of UTF-8.
+        int cap = 3 * wlen;
+        char* p = static_cast<char*>(arena.Allocate(sizeof(Stat) + 1 + cap + 1, alignof(Stat)));
+        // For reparse points EaSize holds the reparse tag.
+        Stat st = ToStat(data.FileAttributes, data.EaSize, data.LastWriteTime.QuadPart,
+                         data.EndOfFile.QuadPart);
+        std::memcpy(p, &st, sizeof(st));
+        char* name = p + sizeof(Stat) + 1;
+        int n = WideCharToMultiByte(CP_UTF8, 0, wname, wlen, name, cap, nullptr, nullptr);
+        CHECK(n > 0) << GetLastError();
+        name[n] = 0;
+        name[-1] = S_ISDIR(st.st_mode) ? DT_DIR : S_ISLNK(st.st_mode) ? DT_LNK : DT_REG;
+        entries.push_back(name);
+      }
+      if (!data.NextEntryOffset) break;
+      pos += data.NextEntryOffset;
+    }
+  }
 
   if (GetLastError() != ERROR_NO_MORE_FILES) {
     entries.resize(orig_size);
@@ -151,8 +162,9 @@ const Stat& EntryStat(const char* entry) {
 bool LStat(const char* path, Stat& st) {
   WIN32_FILE_ATTRIBUTE_DATA data;
   if (!GetFileAttributesExW(WidePath(path).c_str(), GetFileExInfoStandard, &data)) return false;
-  st =
-      ToStat(data.dwFileAttributes, 0, data.ftLastWriteTime, data.nFileSizeHigh, data.nFileSizeLow);
+  st = ToStat(data.dwFileAttributes, 0,
+              Int64(data.ftLastWriteTime.dwHighDateTime, data.ftLastWriteTime.dwLowDateTime),
+              Int64(data.nFileSizeHigh, data.nFileSizeLow));
   return true;
 }
 
