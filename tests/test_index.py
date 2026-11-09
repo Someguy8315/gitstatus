@@ -247,6 +247,49 @@ class UpstreamTest(unittest.TestCase):
                 check(0, 0)
 
 
+class JournalTest(unittest.TestCase):
+    def test_changes_between_queries(self):
+        with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
+            root = Path(temporary)
+            init(root)
+            for d in ("a/b/c", "a/d", "e"):
+                (root / d).mkdir(parents=True)
+                for i in range(3):
+                    (root / d / f"{i}.txt").write_text(f"{d} {i}\n")
+            git(root, "add", ".")
+            git(root, "commit", "-m", "base")
+
+            with Daemon(self) as daemon:
+                daemon.check(root, (0, 0, 0, 0))
+                daemon.check(root, (0, 0, 0, 0))
+                (root / "a/b/c/0.txt").write_text("changed\n")
+                daemon.check(root, (0, 1, 0, 0))
+                (root / "a/d/new.txt").write_text("new\n")
+                daemon.check(root, (0, 1, 0, 1))
+                (root / "e/1.txt").unlink()
+                daemon.check(root, (0, 2, 0, 1))
+                (root / "a/b/c/0.txt").write_text("a/b/c 0\n")
+                (root / "a/d/new.txt").unlink()
+                (root / "e/1.txt").write_text("e 1\n")
+                daemon.check(root, (0, 0, 0, 0))
+                # Only the timestamp changes.
+                os.utime(root / "a/d/2.txt", (1, 1))
+                daemon.check(root, (0, 0, 0, 0))
+                (root / "a/d/2.txt").write_text("a/d 9\n")
+                daemon.check(root, (0, 1, 0, 0))
+                git(root, "checkout", "--", ".")
+                daemon.check(root, (0, 0, 0, 0))
+                # Moving a directory changes the paths of all its subdirectories.
+                os.rename(root / "a/b", root / "b")
+                daemon.check(root, (0, 3, 0, 1))
+                (root / "b/c/1.txt").write_text("moved\n")
+                daemon.check(root, (0, 3, 0, 1))
+                os.rename(root / "b", root / "a/b")
+                daemon.check(root, (0, 1, 0, 0))
+                (root / "a/b/c/1.txt").write_text("a/b/c 1\n")
+                daemon.check(root, (0, 0, 0, 0))
+
+
 class SubmoduleTest(unittest.TestCase):
     def test_head_changes(self):
         with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:

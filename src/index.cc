@@ -105,10 +105,10 @@ bool IsModified(const git_index_entry* entry, const Stat& st, const RepoCaps& ca
   return res;
 }
 
-// Whether a file with this stat is a dirty candidate. Appends it to `stat_candidates` if so.
-bool IsStatCandidate(const git_index_entry* entry, const Stat& st, const RepoCaps& caps,
-                     const ScanOpts& opts, std::vector<StatCandidate>& stat_candidates) {
-  if (!IsModified(entry, st, caps)) return false;
+// Whether a file whose stat differs from its index entry is a dirty candidate. Appends it to
+// `stat_candidates` if so.
+bool IsStatCandidate(const git_index_entry* entry, const Stat& st, const ScanOpts& opts,
+                     std::vector<StatCandidate>& stat_candidates) {
   if (!S_ISREG(st.st_mode) || GIT_INDEX_ENTRY_STAGE(entry)) return true;
   if (opts.verified) {
     auto it = opts.verified->find(entry->path);
@@ -126,6 +126,7 @@ bool IsStatCandidate(const git_index_entry* entry, const Stat& st, const RepoCap
 // Unlike the POSIX version below, this lists every directory even without include_untracked:
 // a listing carries the metadata of all its files, which is cheaper than querying each file.
 // For the same reason it has no use for the untracked cache, which only saves the listing.
+// Instead, it lists only the directories marked as changed and reuses the last listing of others.
 std::vector<const char*> ScanDirs(git_index* index, const std::wstring& root,
                                   IndexDir* const* begin, IndexDir* const* end,
                                   const RepoCaps& caps, const ScanOpts& opts,
@@ -138,29 +139,30 @@ std::vector<const char*> ScanDirs(git_index* index, const std::wstring& root,
   entries.reserve(128);
   std::wstring dir_path;
 
-  auto AddCandidate = [&](const char* kind, const char* path) {
-    if (kind) LOG(DEBUG) << "Dirty candidate (" << kind << "): " << Print(path);
-    dirty_candidates.push_back(path);
-  };
-
-  for (IndexDir* const* it = begin; it != end; ++it) {
-    IndexDir& dir = **it;
+  auto List = [&](IndexDir& dir) {
     dir.arena.Reuse();
+    dir.candidates.clear();
+    dir.modified.clear();
 
-    auto Basename = [&](const git_index_entry* e) { return e->path + dir.path.len; };
+    auto AddCandidate = [&](const char* kind, const char* path) {
+      LOG(DEBUG) << "Dirty candidate (" << kind << "): " << Print(path);
+      dir.candidates.push_back(path);
+    };
 
     auto AddUnmached = [&](StringView basename) {
       if (str.Eq(basename, StringView(".git/"))) return;
       AddCandidate(basename.len ? "new" : "unreadable", dir.arena.StrCat(dir.path, basename));
     };
 
+    auto Basename = [&](const git_index_entry* e) { return e->path + dir.path.len; };
+
     entries.clear();
     arena.Reuse();
     dir_path = root;
     AppendWidePath(dir_path, dir.path);
-    if (!ListDir(dir_path, arena, entries, caps.case_sensitive)) {
+    if (!(dir.listed = ListDir(dir_path, arena, entries, caps.case_sensitive, &dir.id))) {
       AddUnmached("");
-      continue;
+      return;
     }
 
     const git_index_entry* const* file = dir.files.data();
@@ -176,8 +178,8 @@ std::vector<const char*> ScanDirs(git_index* index, const std::wstring& root,
         if (cmp < 0) {
           AddCandidate("deleted", (*file)->path);
         } else if (cmp == 0) {
-          if (IsStatCandidate(*file, EntryStat(entry), caps, opts, stat_candidates)) {
-            AddCandidate(nullptr, (*file)->path);
+          if (IsModified(*file, EntryStat(entry), caps)) {
+            dir.modified.push_back({*file, EntryStat(entry)});
           }
           matched = true;
           ++file;
@@ -207,6 +209,19 @@ std::vector<const char*> ScanDirs(git_index* index, const std::wstring& root,
     }
 
     for (; file != file_end; ++file) AddCandidate("deleted", (*file)->path);
+    dir.changed = false;
+  };
+
+  for (IndexDir* const* it = begin; it != end; ++it) {
+    IndexDir& dir = **it;
+    if (dir.changed || !dir.listed) List(dir);
+    dirty_candidates.insert(dirty_candidates.end(), dir.candidates.begin(), dir.candidates.end());
+    for (const StatCandidate& m : dir.modified) {
+      if (IsStatCandidate(m.entry, m.st, opts, stat_candidates)) {
+        LOG(DEBUG) << "Dirty candidate (modified): " << Print(m.entry->path);
+        dirty_candidates.push_back(m.entry->path);
+      }
+    }
   }
 
   return dirty_candidates;
@@ -305,7 +320,7 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
       for (const git_index_entry* file : dir.files) {
         if (fstatat(*dir_fd, Basename(file), &st, AT_SYMLINK_NOFOLLOW)) {
           AddCandidate(errno == ENOENT ? "deleted" : "unreadable", file->path);
-        } else if (IsStatCandidate(file, st, caps, opts, stat_candidates)) {
+        } else if (IsModified(file, st, caps) && IsStatCandidate(file, st, opts, stat_candidates)) {
           AddCandidate(nullptr, file->path);
         }
       }
@@ -379,7 +394,8 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
           struct stat st;
           if (fstatat(*dir_fd, entry, &st, AT_SYMLINK_NOFOLLOW)) {
             AddCandidate("unreadable", (*file)->path);
-          } else if (IsStatCandidate(*file, st, caps, opts, stat_candidates)) {
+          } else if (IsModified(*file, st, caps) &&
+                     IsStatCandidate(*file, st, opts, stat_candidates)) {
             AddCandidate(nullptr, (*file)->path);
           }
           matched = true;
@@ -523,10 +539,44 @@ void Index::InitSplits(size_t total_weight) {
   CHECK(std::adjacent_find(splits_.begin(), splits_.end()) == splits_.end());
 }
 
+#ifdef _WIN32
+
+void Index::MarkChangedDirs(const std::wstring& root, const ScanOpts& opts) {
+  bool all = opts.include_untracked != include_untracked_;
+  include_untracked_ = opts.include_untracked;
+
+  auto Mark = [&](uint64_t id) {
+    auto range = dirs_by_id_.equal_range(id);
+    for (auto it = range.first; it != range.second; ++it) it->second->changed = true;
+    return range.first != range.second;
+  };
+
+  // Every change is reported with the ID of the directory it was made in.
+  if (!journal_.ReadChanges(root, [&](uint64_t file, uint64_t parent, bool moved) {
+        Mark(parent);
+        // Rather than find out which subdirectories moved along with a directory, list everything.
+        if (Mark(file) && moved) all = true;
+      })) {
+    all = true;
+  }
+
+  for (IndexDir* dir : dirs_) {
+    // Directories behind junctions to other volumes are not in the journal.
+    if (all || dir->id.volume != journal_.volume()) dir->changed = true;
+  }
+}
+
+#endif  // _WIN32
+
 std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts,
                                                    std::vector<StatCandidate>& stat_candidates) {
 #ifdef _WIN32
   const std::wstring root = WidePath(root_dir_);
+  MarkChangedDirs(root, opts);
+  const size_t relist = std::count_if(dirs_.begin(), dirs_.end(), [](const IndexDir* dir) {
+    return dir->changed || !dir->listed;
+  });
+  LOG(INFO) << "Listing " << relist << " of " << dirs_.size() << " directories";
 #else
   int root = open(root_dir_, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   VERIFY(root >= 0);
@@ -572,7 +622,21 @@ std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts,
     while (inflight) cv.wait(lock);
   }
 
+#ifdef _WIN32
+  // Directories missing from dirs_by_id_ would miss their changes.
+  if (error) {
+    for (IndexDir* dir : dirs_) dir->changed = true;
+  }
+#endif
   VERIFY(!error);
+#ifdef _WIN32
+  if (relist) {
+    dirs_by_id_.clear();
+    for (IndexDir* dir : dirs_) {
+      if (dir->listed) dirs_by_id_.emplace(dir->id.file, dir);
+    }
+  }
+#endif
   StrSort(res.begin(), res.end(), git_index_is_case_sensitive(git_index_));
   auto StrEq = [](const char* a, const char* b) { return !strcmp(a, b); };
   res.erase(std::unique(res.begin(), res.end(), StrEq), res.end());

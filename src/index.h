@@ -27,6 +27,8 @@
 #include <vector>
 
 #include "arena.h"
+#include "change_journal.h"
+#include "dir.h"
 #include "options.h"
 #include "stat.h"
 #include "string_view.h"
@@ -79,6 +81,17 @@ struct IndexDir {
 
   Arena arena;
   std::vector<const char*> unmatched;
+
+#ifdef _WIN32
+  // The last listing, reused while the change journal shows nothing changed in the directory.
+  DirId id;
+  bool listed = false;
+  bool changed = true;
+  // Dirty candidates other than the modified files: new, deleted and unreadable.
+  std::vector<const char*> candidates;
+  // Index entries whose stat differs, with that stat.
+  std::vector<StatCandidate> modified;
+#endif
 };
 
 class Index {
@@ -92,6 +105,10 @@ class Index {
  private:
   size_t InitDirs(git_index* index);
   void InitSplits(size_t total_weight);
+#ifdef _WIN32
+  // Sets `changed` on the directories that need listing.
+  void MarkChangedDirs(const std::wstring& root, const ScanOpts& opts);
+#endif
 
   Arena arena_;
   WithArena<std::vector<IndexDir*>> dirs_;
@@ -99,6 +116,12 @@ class Index {
   git_index* git_index_;
   const char* root_dir_;
   RepoCaps caps_;
+#ifdef _WIN32
+  ChangeJournal journal_;
+  // Listed directories by file ID.
+  std::unordered_multimap<uint64_t, IndexDir*> dirs_by_id_;
+  bool include_untracked_ = false;
+#endif
 };
 
 }  // namespace gitstatus

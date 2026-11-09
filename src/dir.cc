@@ -113,13 +113,16 @@ std::wstring WidePath(const char* path) {
 }
 
 bool ListDir(const std::wstring& dir, Arena& arena, std::vector<char*>& entries,
-             bool case_sensitive) {
+             bool case_sensitive, DirId* id) {
   const size_t orig_size = entries.size();
   HANDLE h = CreateFileW(dir.c_str(), FILE_LIST_DIRECTORY,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   if (h == INVALID_HANDLE_VALUE) return false;
   ON_SCOPE_EXIT(&) { CHECK(CloseHandle(h)) << GetLastError(); };
+
+  BY_HANDLE_FILE_INFORMATION info;
+  if (id && !GetFileInformationByHandle(h, &info)) return false;
 
   alignas(8) static thread_local char buf[64 << 10];
   while (GetFileInformationByHandleEx(h, FileFullDirectoryInfo, buf, sizeof(buf))) {
@@ -152,6 +155,10 @@ bool ListDir(const std::wstring& dir, Arena& arena, std::vector<char*>& entries,
     return false;
   }
   StrSort(entries.data() + orig_size, entries.data() + entries.size(), case_sensitive);
+  if (id) {
+    id->volume = info.dwVolumeSerialNumber;
+    id->file = static_cast<uint64_t>(Int64(info.nFileIndexHigh, info.nFileIndexLow));
+  }
   return true;
 }
 

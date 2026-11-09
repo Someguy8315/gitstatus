@@ -4,7 +4,9 @@
 > [oh-my-posh](https://github.com/JanDeDobbeleer/oh-my-posh). It speaks the same protocol but takes
 > and returns Windows paths (`C:/x`, `//server/share/x`) instead of MSYS ones and needs no MSYS
 > runtime. It doesn't use the untracked cache: one directory query returns the metadata of every
-> file. Build it from a shell with clang-cl, CMake and Ninja on `PATH`:
+> file. Between queries, the NTFS change journal tells which directories need listing again; it
+> needs no privileges and, unlike a directory watch, holds no handles. Build it from a shell with
+> clang-cl, CMake and Ninja on `PATH`:
 >
 > ```powershell
 > cmake -G Ninja -B obj -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_MT=llvm-mt

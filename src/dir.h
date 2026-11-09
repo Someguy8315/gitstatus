@@ -22,6 +22,7 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <cstdint>
 #include <string>
 
 #include "stat.h"
@@ -41,11 +42,19 @@ void AppendWidePath(std::wstring& out, StringView path);
 // "\\?\" path, which is not limited to MAX_PATH.
 std::wstring WidePath(const char* path);
 
+// Identifies a directory: the serial number of its volume and its file ID, which is the file
+// reference number on NTFS.
+struct DirId {
+  uint32_t volume = 0;
+  uint64_t file = 0;
+};
+
 // The Windows counterpart of the POSIX ListDir below. dir must be a WidePath() ending with '\'.
 // Every entry additionally carries its Stat (see EntryStat()) because a single directory query
-// returns names and metadata together, which spares a separate stat for each file.
+// returns names and metadata together, which spares a separate stat for each file. On success,
+// stores the ID of the listed directory in `id` unless it's null.
 bool ListDir(const std::wstring& dir, Arena& arena, std::vector<char*>& entries,
-             bool case_sensitive);
+             bool case_sensitive, DirId* id = nullptr);
 
 // Returns the Stat of an entry produced by ListDir().
 const Stat& EntryStat(const char* entry);
