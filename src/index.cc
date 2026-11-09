@@ -306,10 +306,17 @@ std::vector<const char*> ScanDirs(git_index* index, int root_fd, IndexDir* const
 }  // namespace
 
 RepoCaps::RepoCaps(git_repository* repo, git_index* index) {
-  trust_filemode = git_index_is_filemode_trustworthy(index);
-  has_symlinks = git_index_supports_symlinks(index);
-  case_sensitive = git_index_is_case_sensitive(index);
-  precompose_unicode = git_index_precompose_unicode(index);
+  const int caps = git_index_caps(index);
+  trust_filemode = !(caps & GIT_INDEX_CAPABILITY_NO_FILEMODE);
+  has_symlinks = !(caps & GIT_INDEX_CAPABILITY_NO_SYMLINKS);
+  case_sensitive = IsCaseSensitive(index);
+  git_config* cfg;
+  VERIFY(!git_repository_config_snapshot(&cfg, repo)) << GitError();
+  ON_SCOPE_EXIT(=) { git_config_free(cfg); };
+  int precompose = 0;
+  int error = git_config_get_bool(&precompose, cfg, "core.precomposeunicode");
+  VERIFY(!error || error == GIT_ENOTFOUND) << GitError();
+  precompose_unicode = precompose != 0;
   LOG(DEBUG) << "Repository capabilities for " << Print(git_repository_workdir(repo)) << ": "
              << "is_filemode_trustworthy = " << std::boolalpha << trust_filemode << ", "
              << "index_supports_symlinks = " << std::boolalpha << has_symlinks << ", "
@@ -328,7 +335,7 @@ Index::Index(git_repository* repo, git_index* index)
 }
 
 size_t Index::InitDirs(git_index* index) {
-  const Str<> str(git_index_is_case_sensitive(index));
+  const Str<> str(IsCaseSensitive(index));
   const size_t index_size = git_index_entrycount(index);
   dirs_.reserve(index_size / 8);
   std::stack<IndexDir*> stack;
@@ -447,7 +454,7 @@ std::vector<const char*> Index::GetDirtyCandidates(const ScanOpts& opts) {
   }
 
   VERIFY(!error);
-  StrSort(res.begin(), res.end(), git_index_is_case_sensitive(git_index_));
+  StrSort(res.begin(), res.end(), IsCaseSensitive(git_index_));
   auto StrEq = [](const char* a, const char* b) { return !strcmp(a, b); };
   res.erase(std::unique(res.begin(), res.end(), StrEq), res.end());
   return res;

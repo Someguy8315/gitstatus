@@ -223,7 +223,7 @@ if [ "$gitstatus_cpu" = x86-64 ]; then
 fi
 
 libgit2_cmake_flags=
-libgit2_cflags="${CFLAGS-} $cflags -O3 -DNDEBUG"
+libgit2_cflags="${CFLAGS-} $cflags -O3 -DNDEBUG -DGIT_ZERO_NSEC"
 
 gitstatus_cxx=g++
 gitstatus_cxxflags="${CXXFLAGS-} $cflags -I${workdir}/libgit2/include -DGITSTATUS_ZERO_NSEC -D_GNU_SOURCE -D_GLIBCXX_ASSERTIONS"
@@ -323,7 +323,7 @@ if [ ! -e "$libgit2_tarball" ]; then
         exit 1
       fi
     fi
-    libgit2_url=https://github.com/romkatv/libgit2/archive/"$libgit2_version".tar.gz
+    libgit2_url=https://github.com/libgit2/libgit2/archive/refs/tags/v"$libgit2_version".tar.gz
     if ! >"$libgit2_tmp" command wget --no-config -qO- -- "$libgit2_url" &&
        ! >"$libgit2_tmp" command wget             -qO- -- "$libgit2_url"; then
       set -x
@@ -377,19 +377,22 @@ fi
 cd -- "$workdir"
 command tar -xzf "$libgit2_tarball"
 command mv -- libgit2-"$libgit2_version" libgit2
+command git -C libgit2 apply --check "$outdir"/deps/libgit2.patch
+command git -C libgit2 apply "$outdir"/deps/libgit2.patch
 command mkdir libgit2/build
 cd libgit2/build
 
 CFLAGS="$libgit2_cflags" command cmake \
   -DCMAKE_BUILD_TYPE=None              \
-  -DZERO_NSEC=ON                       \
-  -DTHREADSAFE=ON                      \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5    \
+  -DUSE_THREADS=ON                     \
   -DUSE_BUNDLED_ZLIB=ON                \
   -DREGEX_BACKEND=builtin              \
   -DUSE_HTTP_PARSER=builtin            \
   -DUSE_SSH=OFF                        \
   -DUSE_HTTPS=OFF                      \
-  -DBUILD_CLAR=OFF                     \
+  -DBUILD_TESTS=OFF                    \
+  -DBUILD_CLI=OFF                      \
   -DUSE_GSSAPI=OFF                     \
   -DUSE_NTLMCLIENT=OFF                 \
   -DBUILD_SHARED_LIBS=OFF              \

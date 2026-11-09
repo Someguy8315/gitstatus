@@ -1,0 +1,949 @@
+diff --git a/include/git2/branch.h b/include/git2/branch.h
+index 56d737d0f..520bbbac4 100644
+--- a/include/git2/branch.h
++++ b/include/git2/branch.h
+@@ -199,6 +199,14 @@ GIT_EXTERN(int) git_branch_name(
+ 		const char **out,
+ 		const git_reference *ref);
+ 
++/* gitstatusd: resolve branch.<name>.pushRemote / remote.pushDefault. */
++GIT_EXTERN(int)
++git_branch_push_remote(
++        git_remote **remote_out,
++        git_buf *name_out,
++        git_repository *repo,
++        const char *refname);
++
+ /**
+  * Get the upstream of a branch
+  *
+diff --git a/include/git2/common.h b/include/git2/common.h
+index 70f51a89b..d912c3ebf 100644
+--- a/include/git2/common.h
++++ b/include/git2/common.h
+@@ -259,7 +259,11 @@ typedef enum {
+ 	GIT_OPT_GET_USER_AGENT_PRODUCT,
+ 	GIT_OPT_ADD_SSL_X509_CERT,
+ 	GIT_OPT_GET_PACK_MAX_OBJECT_SIZE,
+-	GIT_OPT_SET_PACK_MAX_OBJECT_SIZE
++	GIT_OPT_SET_PACK_MAX_OBJECT_SIZE,
++	/* gitstatusd-only options, set before starting worker threads. */
++	GIT_OPT_DISABLE_INDEX_CHECKSUM_VERIFICATION,
++	GIT_OPT_DISABLE_INDEX_FILEPATH_VALIDATION,
++	GIT_OPT_DISABLE_READNG_PACKED_TAGS
+ } git_libgit2_opt_t;
+ 
+ /**
+diff --git a/include/git2/diff.h b/include/git2/diff.h
+index b12e8ab27..b7f8f08da 100644
+--- a/include/git2/diff.h
++++ b/include/git2/diff.h
+@@ -170,7 +170,10 @@ typedef enum {
+ 	/** Include the necessary deflate / delta information so that `git-apply`
+ 	 *  can apply given diff information to binary files.
+ 	 */
+-	GIT_DIFF_SHOW_BINARY = (1u << 30)
++	GIT_DIFF_SHOW_BINARY = (1u << 30),
++
++	/* gitstatusd: callback can stop reporting a particular delta type. */
++	GIT_DIFF_EXEMPLARS = (1u << 31)
+ } git_diff_option_t;
+ 
+ /**
+@@ -349,6 +352,12 @@ typedef struct {
+  * @param payload the user-specified callback payload
+  * @return 0 on success, 1 to skip this delta, or an error code
+  */
++/* With GIT_DIFF_EXEMPLARS, positive notify results are a bitmask. */
++enum {
++	GIT_DIFF_DELTA_DO_NOT_INSERT = 1,
++	GIT_DIFF_DELTA_SKIP_TYPE = 2
++};
++
+ typedef int GIT_CALLBACK(git_diff_notify_cb)(
+ 	const git_diff *diff_so_far,
+ 	const git_diff_delta *delta_to_add,
+@@ -468,6 +477,10 @@ typedef struct {
+ 	 * Defaults to "b".
+ 	 */
+ 	const char *new_prefix;
++
++	/* gitstatusd: inclusive lexicographic bounds; NULL/empty means unbounded. */
++	const char *range_start;
++	const char *range_end;
+ } git_diff_options;
+ 
+ /** The current version of the diff options structure */
+diff --git a/include/git2/index.h b/include/git2/index.h
+index 9ff244204..622c163fa 100644
+--- a/include/git2/index.h
++++ b/include/git2/index.h
+@@ -372,6 +372,13 @@ GIT_EXTERN(int) git_index_set_version(git_index *index, unsigned int version);
+  */
+ GIT_EXTERN(int) git_index_read(git_index *index, int force);
+ 
++/* gitstatusd: report whether a read invalidated cached entry pointers. */
++GIT_EXTERN(int) git_index_read_ex(git_index *index, int force, int *read);
++
++/* gitstatusd: the index must already be sorted and remain immutable. */
++GIT_EXTERN(const git_index_entry *)
++git_index_get_byindex_no_sort(git_index *index, size_t n);
++
+ /**
+  * Write an existing index object from memory back to disk
+  * using an atomic file lock.
+diff --git a/include/git2/refdb.h b/include/git2/refdb.h
+index 536ef10da..cc0d3e5ab 100644
+--- a/include/git2/refdb.h
++++ b/include/git2/refdb.h
+@@ -65,6 +65,9 @@ GIT_EXTERN(int) git_refdb_compress(git_refdb *refdb);
+  */
+ GIT_EXTERN(void) git_refdb_free(git_refdb *refdb);
+ 
++GIT_EXTERN(int)
++git_refdb_lookup(git_reference **out, git_refdb *refdb, const char *ref_name);
++
+ /** @} */
+ GIT_END_DECL
+ 
+diff --git a/include/git2/repository.h b/include/git2/repository.h
+index b203576af..bd1bf7474 100644
+--- a/include/git2/repository.h
++++ b/include/git2/repository.h
+@@ -102,6 +102,15 @@ GIT_EXTERN(int) git_repository_discover(
+ 		git_buf *out,
+ 		const char *start_path,
+ 		int across_fs,
++        const char *ceiling_dirs);
++
++/* gitstatusd: discover both paths without allocating a repository. */
++GIT_EXTERN(int)
++git_repository_discover_ex(
++        git_buf *gitdir,
++        git_buf *workdir,
++        const char *start_path,
++        uint32_t flags,
+ 		const char *ceiling_dirs);
+ 
+ /**
+diff --git a/src/libgit2/attr_file.c b/src/libgit2/attr_file.c
+index d52a11590..26274a3a6 100644
+--- a/src/libgit2/attr_file.c
++++ b/src/libgit2/attr_file.c
+@@ -281,9 +281,12 @@ int git_attr_file__out_of_date(
+ 	case GIT_ATTR_FILE_SOURCE_MEMORY:
+ 		return 0;
+ 
+-	case GIT_ATTR_FILE_SOURCE_FILE:
++	case GIT_ATTR_FILE_SOURCE_FILE: {
++		/* Concurrent readers must not update the shared cached stamp. */
++		git_futils_filestamp stamp = file->cache_data.stamp;
+ 		return git_futils_filestamp_check(
+-			&file->cache_data.stamp, file->entry->fullpath);
++			&stamp, file->entry->fullpath);
++	}
+ 
+ 	case GIT_ATTR_FILE_SOURCE_INDEX: {
+ 		int error;
+diff --git a/src/libgit2/branch.c b/src/libgit2/branch.c
+index 9a31c9c6f..57c433d98 100644
+--- a/src/libgit2/branch.c
++++ b/src/libgit2/branch.c
+@@ -489,6 +489,62 @@ cleanup:
+ 	return error;
+ }
+ 
++int git_branch_push_remote(
++	git_remote **remote_out, git_buf *name_out,
++	git_repository *repo, const char *refname)
++{
++	git_str remote_name = GIT_STR_INIT, name = GIT_STR_INIT;
++	git_remote *remote = NULL;
++	git_config *config;
++	const git_refspec *refspec;
++	int error;
++
++	GIT_ASSERT_ARG(remote_out);
++	GIT_ASSERT_ARG(name_out);
++	GIT_ASSERT_ARG(repo);
++	GIT_ASSERT_ARG(refname);
++	*remote_out = NULL;
++	if (!git_reference__is_branch(refname))
++		return not_a_local_branch(refname);
++	if ((error = git_repository_config_snapshot(&config, repo)) < 0)
++		return error;
++
++	error = retrieve_upstream_configuration(
++		&remote_name, config, refname, "branch.%s.pushremote");
++	if (error == GIT_ENOTFOUND)
++		error = git_config__get_string_buf(&remote_name, config, "remote.pushdefault");
++	if (error < 0)
++		goto cleanup;
++	if (!remote_name.size) {
++		error = GIT_ENOTFOUND;
++		goto cleanup;
++	}
++
++	if (strcmp(remote_name.ptr, ".") != 0) {
++		if ((error = git_remote_lookup(&remote, repo, remote_name.ptr)) < 0)
++			goto cleanup;
++		refspec = git_remote__matching_refspec(remote, refname);
++		if (!refspec) {
++			error = GIT_ENOTFOUND;
++			goto cleanup;
++		}
++		error = git_refspec__transform(&name, refspec, refname);
++	} else {
++		error = git_str_sets(&name, refname);
++	}
++	if (error < 0 || (error = git_buf_fromstr(name_out, &name)) < 0)
++		goto cleanup;
++	*remote_out = remote;
++	remote = NULL;
++
++cleanup:
++	git_config_free(config);
++	git_remote_free(remote);
++	git_str_dispose(&remote_name);
++	git_str_dispose(&name);
++	return error;
++}
++
+ static int git_branch_upstream_with_format(
+ 	git_str *out,
+ 	git_repository *repo,
+diff --git a/src/libgit2/diff_generate.c b/src/libgit2/diff_generate.c
+index 654145e34..ae9625df4 100644
+--- a/src/libgit2/diff_generate.c
++++ b/src/libgit2/diff_generate.c
+@@ -33,6 +33,7 @@ typedef struct {
+ 
+ 	uint32_t diffcaps;
+ 	bool index_updated;
++	uint32_t seen_delta_types;
+ } git_diff_generated;
+ 
+ static git_diff_delta *diff_delta__alloc(
+@@ -75,9 +76,23 @@ static int diff_insert_delta(
+ 	int error = 0;
+ 
+ 	if (diff->base.opts.notify_cb) {
++		if (DIFF_FLAG_IS_SET(diff, GIT_DIFF_EXEMPLARS) &&
++		    (diff->seen_delta_types & (1u << delta->status))) {
++			git__free(delta);
++			return 0;
++		}
+ 		error = diff->base.opts.notify_cb(
+ 			&diff->base, delta, matched_pathspec, diff->base.opts.payload);
+ 
++		if (error > 0 && DIFF_FLAG_IS_SET(diff, GIT_DIFF_EXEMPLARS)) {
++			if (error & GIT_DIFF_DELTA_SKIP_TYPE) {
++				diff->seen_delta_types |= 1u << delta->status;
++				if (delta->status == GIT_DELTA_UNTRACKED)
++					diff->base.opts.flags &=
++						~(GIT_DIFF_INCLUDE_UNTRACKED | GIT_DIFF_RECURSE_UNTRACKED_DIRS);
++			}
++			error &= GIT_DIFF_DELTA_DO_NOT_INSERT;
++		}
+ 		if (error) {
+ 			git__free(delta);
+ 
+@@ -164,6 +179,10 @@ static int diff_delta__from_one(
+ 	if (DIFF_FLAG_IS_SET(diff, GIT_DIFF_REVERSE))
+ 		has_old = !has_old;
+ 
++	if (DIFF_FLAG_IS_SET(diff, GIT_DIFF_EXEMPLARS) &&
++	    (diff->seen_delta_types & (1u << status)))
++		return 0;
++
+ 	if ((entry->flags & GIT_INDEX_ENTRY_VALID) != 0)
+ 		return 0;
+ 
+@@ -215,6 +234,13 @@ static int diff_delta__from_one(
+ 
+ 	diff_delta__flag_known_sizes(delta);
+ 
++	if (status == GIT_DELTA_TYPECHANGE) {
++		if (has_old)
++			delta->new_file.mode = GIT_FILEMODE_TREE;
++		else
++			delta->old_file.mode = GIT_FILEMODE_TREE;
++	}
++
+ 	return diff_insert_delta(diff, delta, matched_pathspec);
+ }
+ 
+@@ -235,6 +261,10 @@ static int diff_delta__from_two(
+ 
+ 	oid_type = diff->base.opts.oid_type;
+ 
++	if (DIFF_FLAG_IS_SET(diff, GIT_DIFF_EXEMPLARS) &&
++	    (diff->seen_delta_types & (1u << status)))
++		return 0;
++
+ 	if (status == GIT_DELTA_UNMODIFIED &&
+ 		DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_INCLUDE_UNMODIFIED))
+ 		return 0;
+@@ -285,43 +315,6 @@ static int diff_delta__from_two(
+ 	return diff_insert_delta(diff, delta, matched_pathspec);
+ }
+ 
+-static git_diff_delta *diff_delta__last_for_item(
+-	git_diff_generated *diff,
+-	const git_index_entry *item)
+-{
+-	git_diff_delta *delta = git_vector_last(&diff->base.deltas);
+-	if (!delta)
+-		return NULL;
+-
+-	switch (delta->status) {
+-	case GIT_DELTA_UNMODIFIED:
+-	case GIT_DELTA_DELETED:
+-		if (git_oid__cmp(&delta->old_file.id, &item->id) == 0)
+-			return delta;
+-		break;
+-	case GIT_DELTA_ADDED:
+-		if (git_oid__cmp(&delta->new_file.id, &item->id) == 0)
+-			return delta;
+-		break;
+-	case GIT_DELTA_UNREADABLE:
+-	case GIT_DELTA_UNTRACKED:
+-		if (diff->base.strcomp(delta->new_file.path, item->path) == 0 &&
+-			git_oid__cmp(&delta->new_file.id, &item->id) == 0)
+-			return delta;
+-		break;
+-	case GIT_DELTA_MODIFIED:
+-		if (git_oid__cmp(&delta->old_file.id, &item->id) == 0 ||
+-		    (delta->new_file.mode == item->mode &&
+-			git_oid__cmp(&delta->new_file.id, &item->id) == 0))
+-			return delta;
+-		break;
+-	default:
+-		break;
+-	}
+-
+-	return NULL;
+-}
+-
+ static char *diff_strdup_prefix(git_pool *pool, const char *prefix)
+ {
+ 	size_t len = strlen(prefix);
+@@ -868,6 +861,9 @@ static int maybe_modified(
+ 			 !git_oid_is_zero(&oitem->id)) {
+ 		status = GIT_DELTA_UNMODIFIED;
+ 
++	} else if ((oitem->flags_extended & GIT_INDEX_ENTRY_INTENT_TO_ADD) && new_is_workdir) {
++		status = GIT_DELTA_ADDED;
++
+ 	/* if we have an unknown OID and a workdir iterator, then check some
+ 	 * circumstances that can accelerate things or need special handling
+ 	 */
+@@ -888,8 +884,7 @@ static int maybe_modified(
+ 		 */
+ 		else if (omode != nmode || oitem->file_size != nitem->file_size) {
+ 			status = GIT_DELTA_MODIFIED;
+-			modified_uncertain =
+-				(oitem->file_size <= 0 && nitem->file_size > 0);
++			/* Read-only gitstatusd does not need refreshed index stat data. */
+ 		}
+ 		else if (!git_index_time_eq(&oitem->mtime, &nitem->mtime) ||
+ 			(use_ctime && !git_index_time_eq(&oitem->ctime, &nitem->ctime)) ||
+@@ -1058,18 +1053,27 @@ static int handle_unmatched_new_item(
+ 		delta_type = GIT_DELTA_CONFLICTED;
+ 
+ 	/* update delta_type if this item is ignored */
+-	else if (git_iterator_current_is_ignored(info->new_iter))
++	else if (!(nitem->mode == GIT_FILEMODE_TREE && contains_oitem) &&
++	         git_iterator_current_is_ignored(info->new_iter))
+ 		delta_type = GIT_DELTA_IGNORED;
+ 
+ 	if (nitem->mode == GIT_FILEMODE_TREE) {
+ 		bool recurse_into_dir = contains_oitem;
++		const char *matched_pathspec;
++
++		if (!contains_oitem && delta_type == GIT_DELTA_UNTRACKED &&
++		    DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_INCLUDE_UNTRACKED))
++			return iterator_advance(&info->nitem, info->new_iter);
+ 
+ 		/* check if user requests recursion into this type of dir */
+ 		recurse_into_dir = contains_oitem ||
+ 			(delta_type == GIT_DELTA_UNTRACKED &&
+ 			 DIFF_FLAG_IS_SET(diff, GIT_DIFF_RECURSE_UNTRACKED_DIRS)) ||
+ 			(delta_type == GIT_DELTA_IGNORED &&
+-			 DIFF_FLAG_IS_SET(diff, GIT_DIFF_RECURSE_IGNORED_DIRS));
++			 DIFF_FLAG_IS_SET(diff, GIT_DIFF_RECURSE_IGNORED_DIRS)) ||
++			(delta_type == GIT_DELTA_UNTRACKED &&
++			 info->new_iter->type == GIT_ITERATOR_WORKDIR &&
++			 !diff_pathspec_match(&matched_pathspec, diff, nitem));
+ 
+ 		/* do not advance into directories that contain a .git file */
+ 		if (recurse_into_dir && !contains_oitem) {
+@@ -1089,42 +1093,29 @@ static int handle_unmatched_new_item(
+ 			delta_type == GIT_DELTA_UNTRACKED &&
+ 			DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_ENABLE_FAST_UNTRACKED_DIRS))
+ 		{
+-			git_diff_delta *last;
+ 			git_iterator_status_t untracked_state;
+-
+-			/* attempt to insert record for this directory */
+-			if ((error = diff_delta__from_one(diff, delta_type, NULL, nitem)) != 0)
+-				return error;
+-
+-			/* if delta wasn't created (because of rules), just skip ahead */
+-			last = diff_delta__last_for_item(diff, nitem);
+-			if (!last)
+-				return iterator_advance(&info->nitem, info->new_iter);
++			git_index_entry entry = *nitem;
+ 
+ 			/* iterate into dir looking for an actual untracked file */
+ 			if ((error = iterator_advance_over(
+ 					&info->nitem, &untracked_state, info->new_iter)) < 0)
+ 				return error;
+ 
+-			/* if we found nothing that matched our pathlist filter, exclude */
+-			if (untracked_state == GIT_ITERATOR_STATUS_FILTERED) {
+-				git_vector_pop(&diff->base.deltas);
+-				git__free(last);
+-			}
++			/* Notify only after verifying that the directory is untracked. */
++			if (untracked_state == GIT_ITERATOR_STATUS_FILTERED)
++				return 0;
+ 
+ 			/* if we found nothing or just ignored items, update the record */
+ 			if (untracked_state == GIT_ITERATOR_STATUS_IGNORED ||
+ 				untracked_state == GIT_ITERATOR_STATUS_EMPTY) {
+-				last->status = GIT_DELTA_IGNORED;
++				delta_type = GIT_DELTA_IGNORED;
+ 
+ 				/* remove the record if we don't want ignored records */
+-				if (DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_INCLUDE_IGNORED)) {
+-					git_vector_pop(&diff->base.deltas);
+-					git__free(last);
++				if (DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_INCLUDE_IGNORED))
++					return 0;
+ 				}
+-			}
+ 
+-			return 0;
++			return diff_delta__from_one(diff, delta_type, NULL, &entry);
+ 		}
+ 
+ 		/* try to advance into directory if necessary */
+@@ -1177,10 +1168,6 @@ static int handle_unmatched_new_item(
+ 			delta_type = GIT_DELTA_UNREADABLE;
+ 	}
+ 
+-	/* Actually create the record for this item if necessary */
+-	if ((error = diff_delta__from_one(diff, delta_type, NULL, nitem)) != 0)
+-		return error;
+-
+ 	/* If user requested TYPECHANGE records, then check for that instead of
+ 	 * just generating an ADDED/UNTRACKED record
+ 	 */
+@@ -1189,13 +1176,13 @@ static int handle_unmatched_new_item(
+ 		contains_oitem)
+ 	{
+ 		/* this entry was prefixed with a tree - make TYPECHANGE */
+-		git_diff_delta *last = diff_delta__last_for_item(diff, nitem);
+-		if (last) {
+-			last->status = GIT_DELTA_TYPECHANGE;
+-			last->old_file.mode = GIT_FILEMODE_TREE;
+-		}
++		delta_type = GIT_DELTA_TYPECHANGE;
+ 	}
+ 
++	/* Actually create the record for this item if necessary */
++	if ((error = diff_delta__from_one(diff, delta_type, NULL, nitem)) != 0)
++		return error;
++
+ 	return iterator_advance(&info->nitem, info->new_iter);
+ }
+ 
+@@ -1209,31 +1196,26 @@ static int handle_unmatched_old_item(
+ 	if (git_index_entry_is_conflict(info->oitem))
+ 		delta_type = GIT_DELTA_CONFLICTED;
+ 
+-	if ((error = diff_delta__from_one(diff, delta_type, info->oitem, NULL)) < 0)
+-		return error;
+-
+ 	/* if we are generating TYPECHANGE records then check for that
+ 	 * instead of just generating a DELETE record
+ 	 */
+-	if (DIFF_FLAG_IS_SET(diff, GIT_DIFF_INCLUDE_TYPECHANGE_TREES) &&
++	else if (DIFF_FLAG_IS_SET(diff, GIT_DIFF_INCLUDE_TYPECHANGE_TREES) &&
+ 		entry_is_prefixed(diff, info->nitem, info->oitem))
+ 	{
+ 		/* this entry has become a tree! convert to TYPECHANGE */
+-		git_diff_delta *last = diff_delta__last_for_item(diff, info->oitem);
+-		if (last) {
+-			last->status = GIT_DELTA_TYPECHANGE;
+-			last->new_file.mode = GIT_FILEMODE_TREE;
+-		}
++		delta_type = GIT_DELTA_TYPECHANGE;
+ 
+ 		/* If new_iter is a workdir iterator, then this situation
+ 		 * will certainly be followed by a series of untracked items.
+ 		 * Unless RECURSE_UNTRACKED_DIRS is set, skip over them...
+ 		 */
+-		if (S_ISDIR(info->nitem->mode) &&
+-			DIFF_FLAG_ISNT_SET(diff, GIT_DIFF_RECURSE_UNTRACKED_DIRS))
+-			return iterator_advance(&info->nitem, info->new_iter);
++		if ((error = iterator_advance(&info->nitem, info->new_iter)) < 0)
++			return error;
+ 	}
+ 
++	if ((error = diff_delta__from_one(diff, delta_type, info->oitem, NULL)) < 0)
++		return error;
++
+ 	return iterator_advance(&info->oitem, info->old_iter);
+ }
+ 
+@@ -1290,6 +1272,12 @@ int git_diff__from_iterators(
+ 	while (!error && (info.oitem || info.nitem)) {
+ 		int cmp;
+ 
++		if (new_iter->type == GIT_ITERATOR_INDEX && info.nitem &&
++		    (info.nitem->flags_extended & GIT_INDEX_ENTRY_INTENT_TO_ADD)) {
++			error = iterator_advance(&info.nitem, info.new_iter);
++			continue;
++		}
++
+ 		/* report progress */
+ 		if (opts && opts->progress_cb) {
+ 			if ((error = opts->progress_cb(&diff->base,
+@@ -1356,6 +1344,13 @@ static int diff_prepare_iterator_opts(char **prefix, git_iterator_options *a, in
+ 	a->start = b->start = *prefix;
+ 	a->end = b->end = *prefix;
+ 
++	if (opts && opts->range_start && *opts->range_start &&
++	    (!*prefix || !**prefix || strcmp(opts->range_start, *prefix) > 0))
++		a->start = b->start = opts->range_start;
++	if (opts && opts->range_end && *opts->range_end &&
++	    (!*prefix || !**prefix || strcmp(opts->range_end, *prefix) < 0))
++		a->end = b->end = opts->range_end;
++
+ 	return 0;
+ }
+ 
+@@ -1747,4 +1742,3 @@ on_error:
+ 
+ 	return error;
+ }
+-
+diff --git a/src/libgit2/index.c b/src/libgit2/index.c
+index 9b0c746ca..70b340ac1 100644
+--- a/src/libgit2/index.c
++++ b/src/libgit2/index.c
+@@ -121,6 +121,8 @@ struct reuc_entry_internal {
+ };
+ 
+ bool git_index__enforce_unsaved_safety = false;
++bool git_index__disable_checksum_verification = false;
++bool git_index__disable_filepath_validation = false;
+ 
+ /* local declarations */
+ static int read_extension(size_t *read_len, git_index *index, size_t checksum_size, const char *buffer, size_t buffer_size);
+@@ -662,11 +664,19 @@ static int compare_checksum(git_index *index)
+ }
+ 
+ int git_index_read(git_index *index, int force)
++{
++	return git_index_read_ex(index, force, NULL);
++}
++
++int git_index_read_ex(git_index *index, int force, int *read)
+ {
+ 	int error = 0, updated;
+ 	git_str buffer = GIT_STR_INIT;
+ 	git_futils_filestamp stamp = index->stamp;
+ 
++	if (read)
++		*read = 0;
++
+ 	if (!index->index_file_path)
+ 		return create_index_error(-1,
+ 			"failed to read index: The index is in-memory only");
+@@ -674,8 +684,12 @@ int git_index_read(git_index *index, int force)
+ 	index->on_disk = git_fs_path_exists(index->index_file_path);
+ 
+ 	if (!index->on_disk) {
+-		if (force && (error = git_index_clear(index)) < 0)
++		if (force) {
++			if ((error = git_index_clear(index)) < 0)
+ 			return error;
++			if (read)
++				*read = 1;
++		}
+ 
+ 		index->dirty = 0;
+ 		return 0;
+@@ -697,6 +711,9 @@ int git_index_read(git_index *index, int force)
+ 	if (error < 0)
+ 		return error;
+ 
++	if (read)
++		*read = 1;
++
+ 	index->tree = NULL;
+ 	git_pool_clear(&index->tree_pool);
+ 
+@@ -954,7 +971,8 @@ static int index_entry_create(
+ 	if (st)
+ 		mode = st->st_mode;
+ 
+-	if (!git_path_is_valid(repo, path, mode, path_valid_flags)) {
++	if (!git_index__disable_filepath_validation &&
++	    !git_path_is_valid(repo, path, mode, path_valid_flags)) {
+ 		git_error_set(GIT_ERROR_INDEX, "invalid path: '%s'", path);
+ 		return -1;
+ 	}
+@@ -2757,7 +2775,8 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
+ 	 * Precalculate the hash of the files's contents -- we'll match
+ 	 * it to the provided checksum in the footer.
+ 	 */
+-	git_hash_buf(checksum, buffer, buffer_size - checksum_size,
++	if (!git_index__disable_checksum_verification)
++		git_hash_buf(checksum, buffer, buffer_size - checksum_size,
+ 		git_oid_algorithm(index->oid_type));
+ 
+ 	/* Parse header */
+@@ -2830,14 +2849,15 @@ static int parse_index(git_index *index, const char *buffer, size_t buffer_size)
+ 	 * Note: checksum may be 0 if the index was written by a client
+ 	 * where index.skipHash was set to true.
+ 	 */
+-	if (memcmp(zero_checksum, buffer, checksum_size) != 0 &&
++	if (!git_index__disable_checksum_verification &&
++	    memcmp(zero_checksum, buffer, checksum_size) != 0 &&
+ 	    memcmp(checksum, buffer, checksum_size) != 0) {
+ 		error = index_error_invalid(
+ 			"calculated checksum does not match expected");
+ 		goto done;
+ 	}
+ 
+-	memcpy(index->checksum, checksum, checksum_size);
++	memcpy(index->checksum, buffer, checksum_size);
+ 
+ #undef seek_forward
+ 
+@@ -3813,30 +3833,31 @@ int git_index_update_all(
+ 
+ int git_index_snapshot_new(git_vector *snap, git_index *index)
+ {
+-	int error;
+-
+ 	GIT_REFCOUNT_INC(index);
+ 
+ 	git_atomic32_inc(&index->readers);
+ 	git_vector_sort(&index->entries);
+ 
+-	error = git_vector_dup(snap, &index->entries, index->entries._cmp);
++	/* gitstatusd never mutates the index while readers are active. */
++	*snap = index->entries;
+ 
+-	if (error < 0)
+-		git_index_snapshot_release(snap, index);
+-
+-	return error;
++	return 0;
+ }
+ 
+ void git_index_snapshot_release(git_vector *snap, git_index *index)
+ {
+-	git_vector_dispose(snap);
++	GIT_UNUSED(snap);
+ 
+ 	git_atomic32_dec(&index->readers);
+ 
+ 	git_index_free(index);
+ }
+ 
++const git_index_entry *git_index_get_byindex_no_sort(git_index *index, size_t n)
++{
++	return git_vector_get(&index->entries, n);
++}
++
+ int git_index_snapshot_find(
+ 	size_t *out, git_vector *entries, git_vector_cmp entry_srch,
+ 	const char *path, size_t path_len, int stage)
+diff --git a/src/libgit2/index.h b/src/libgit2/index.h
+index de8a9cf38..19e65efd6 100644
+--- a/src/libgit2/index.h
++++ b/src/libgit2/index.h
+@@ -21,6 +21,8 @@
+ #define GIT_INDEX_FILE_MODE 0666
+ 
+ extern bool git_index__enforce_unsaved_safety;
++extern bool git_index__disable_checksum_verification;
++extern bool git_index__disable_filepath_validation;
+ 
+ struct git_index {
+ 	git_refcount rc;
+@@ -86,7 +88,11 @@ GIT_INLINE(bool) git_index_time_eq(const git_index_time *one, const git_index_ti
+ 		return false;
+ 
+ #ifdef GIT_USE_NSEC
+-	if (one->nanoseconds != two->nanoseconds)
++	if (one->nanoseconds != two->nanoseconds
++#ifdef GIT_ZERO_NSEC
++	    && one->nanoseconds != 0
++#endif
++	   )
+ 		return false;
+ #endif
+ 
+diff --git a/src/libgit2/iterator.c b/src/libgit2/iterator.c
+index 5b3e02485..79526ac9f 100644
+--- a/src/libgit2/iterator.c
++++ b/src/libgit2/iterator.c
+@@ -1186,6 +1186,7 @@ static void filesystem_iterator_frame_pop_ignores(
+ 
+ GIT_INLINE(bool) filesystem_iterator_examine_path(
+ 	bool *is_dir_out,
++	git_fs_path_diriter *diriter,
+ 	iterator_pathlist_search_t *match_out,
+ 	filesystem_iterator *iter,
+ 	filesystem_iterator_entry *frame_entry,
+@@ -1209,8 +1210,12 @@ GIT_INLINE(bool) filesystem_iterator_examine_path(
+ 			if (iter->base.start[path_len] == '/')
+ 				is_dir = true;
+ 
+-			else if (iter->base.start[path_len] != '\0')
+-				cmp = -1;
++			else if (iter->base.start[path_len] != '\0') {
++				struct stat st;
++				/* A directory "b/" sorts after "b.c", unlike the basename "b". */
++				is_dir = !git_fs_path_diriter_stat(&st, diriter) && S_ISDIR(st.st_mode);
++				cmp = (is_dir ? '/' : '\0') - (unsigned char)iter->base.start[path_len];
++			}
+ 		}
+ 
+ 		if (cmp < 0)
+@@ -1421,7 +1426,7 @@ static int filesystem_iterator_frame_push(
+ 		 * whether it's a directory yet or not, so this can give us an
+ 		 * expected type (S_IFDIR or S_IFREG) that we should examine)
+ 		 */
+-		if (!filesystem_iterator_examine_path(&dir_expected, &pathlist_match,
++		if (!filesystem_iterator_examine_path(&dir_expected, &diriter, &pathlist_match,
+ 			iter, frame_entry, path, path_len))
+ 			continue;
+ 
+@@ -2052,6 +2057,7 @@ typedef struct {
+ 	git_iterator base;
+ 	git_vector entries;
+ 	size_t next_idx;
++	bool owns_entries;
+ 
+ 	/* the pseudotree entry */
+ 	git_index_entry tree_entry;
+@@ -2260,6 +2266,8 @@ static void index_iterator_free(git_iterator *i)
+ {
+ 	index_iterator *iter = GIT_CONTAINER_OF(i, index_iterator, base);
+ 
++	if (iter->owns_entries)
++		git_vector_dispose(&iter->entries);
+ 	git_index_snapshot_release(&iter->entries, iter->base.index);
+ 	git_str_dispose(&iter->tree_buf);
+ }
+@@ -2271,6 +2279,8 @@ int git_iterator_for_index(
+ 	git_iterator_options *options)
+ {
+ 	index_iterator *iter;
++	git_vector_cmp cmp;
++	git_vector entries;
+ 	int error;
+ 
+ 	static git_iterator_callbacks callbacks = {
+@@ -2298,9 +2308,15 @@ int git_iterator_for_index(
+ 		(error = index_iterator_init(iter)) < 0)
+ 		goto on_error;
+ 
+-	git_vector_set_cmp(&iter->entries, iterator__ignore_case(&iter->base) ?
+-		git_index_entry_icmp : git_index_entry_cmp);
++	cmp = iterator__ignore_case(&iter->base) ?
++		git_index_entry_icmp : git_index_entry_cmp;
++	if (cmp != iter->entries._cmp) {
++		if ((error = git_vector_dup(&entries, &iter->entries, cmp)) < 0)
++			goto on_error;
++		iter->entries = entries;
++		iter->owns_entries = true;
+ 	git_vector_sort(&iter->entries);
++	}
+ 
+ 	*out = &iter->base;
+ 	return 0;
+diff --git a/src/libgit2/odb_pack.c b/src/libgit2/odb_pack.c
+index ef8d35309..b97838b6b 100644
+--- a/src/libgit2/odb_pack.c
++++ b/src/libgit2/odb_pack.c
+@@ -269,7 +269,7 @@ static int packfile_load__cb(void *data, git_str *path)
+ 
+ static int pack_entry_find(struct git_pack_entry *e, struct pack_backend *backend, const git_oid *oid)
+ {
+-	struct git_pack_file *last_found = backend->last_found, *p;
++	struct git_pack_file *last_found = git_atomic_load(backend->last_found), *p;
+ 	git_midx_entry midx_entry;
+ 	size_t oid_hexsize = git_oid_hexsize(backend->opts.oid_type);
+ 	size_t i;
+@@ -292,7 +292,7 @@ static int pack_entry_find(struct git_pack_entry *e, struct pack_backend *backen
+ 			continue;
+ 
+ 		if (git_pack_entry_find(e, p, oid, oid_hexsize) == 0) {
+-			backend->last_found = p;
++			git_atomic_swap(backend->last_found, p);
+ 			return 0;
+ 		}
+ 	}
+@@ -311,7 +311,7 @@ static int pack_entry_find_prefix(
+ 	size_t i;
+ 	git_oid found_full_oid;
+ 	bool found = false;
+-	struct git_pack_file *last_found = backend->last_found, *p;
++	struct git_pack_file *last_found = git_atomic_load(backend->last_found), *p;
+ 	git_midx_entry midx_entry;
+ 
+ #ifdef GIT_EXPERIMENTAL_SHA256
+@@ -357,7 +357,7 @@ static int pack_entry_find_prefix(
+ 				return git_odb__error_ambiguous("found multiple pack entries");
+ 			git_oid_cpy(&found_full_oid, &e->id);
+ 			found = true;
+-			backend->last_found = p;
++			git_atomic_swap(backend->last_found, p);
+ 		}
+ 	}
+ 
+diff --git a/src/libgit2/refdb.c b/src/libgit2/refdb.c
+index ed33de92b..b3df40c87 100644
+--- a/src/libgit2/refdb.c
++++ b/src/libgit2/refdb.c
+@@ -18,6 +18,7 @@
+ #include "posix.h"
+ 
+ #define DEFAULT_NESTING_LEVEL	5
++bool git_refdb__disable_reading_packed_tags = false;
+ #define MAX_NESTING_LEVEL		10
+ 
+ int git_refdb_new(git_refdb **out, git_repository *repo)
+diff --git a/src/libgit2/refdb.h b/src/libgit2/refdb.h
+index 84e19b1c3..27e8c66a0 100644
+--- a/src/libgit2/refdb.h
++++ b/src/libgit2/refdb.h
+@@ -10,6 +10,7 @@
+ #include "common.h"
+ 
+ #include "git2/refdb.h"
++extern bool git_refdb__disable_reading_packed_tags;
+ #include "repository.h"
+ 
+ struct git_refdb {
+diff --git a/src/libgit2/refdb_fs.c b/src/libgit2/refdb_fs.c
+index aa4278299..0f3bdabad 100644
+--- a/src/libgit2/refdb_fs.c
++++ b/src/libgit2/refdb_fs.c
+@@ -113,6 +113,7 @@ static int packref_cmp(const void *a_, const void *b_)
+ static int packed_reload(refdb_fs_backend *backend)
+ {
+ 	int error;
++	bool sorted = false;
+ 	git_str packedrefs = GIT_STR_INIT;
+ 	size_t oid_hexsize = git_oid_hexsize(backend->oid_type);
+ 	char *scan, *eof, *eol;
+@@ -144,6 +145,13 @@ static int packed_reload(refdb_fs_backend *backend)
+ 	scan = packedrefs.ptr;
+ 	eof  = scan + packedrefs.size;
+ 
++	/* Only stop early when the file explicitly promises sorted references. */
++	if (git__prefixcmp(scan, "# pack-refs with:") == 0 &&
++	    (eol = strchr(scan, '\n')) != NULL) {
++		const char *trait = strstr(scan, " sorted");
++		sorted = trait && trait < eol &&
++			(trait[7] == ' ' || trait[7] == '\r' || trait[7] == '\n');
++	}
+ 	scan = packed_set_peeling_mode(scan, packedrefs.size, backend);
+ 	if (!scan)
+ 		goto parse_failed;
+@@ -172,6 +180,11 @@ static int packed_reload(refdb_fs_backend *backend)
+ 		if (eol[-1] == '\r')
+ 			eol[-1] = '\0';
+ 
++		/* TagDB reads packed tags itself; libgit2 only needs earlier refs. */
++		if (sorted && git_refdb__disable_reading_packed_tags &&
++		    strcmp(scan, "refs/tags/") > 0)
++			break;
++
+ 		if (git_sortedcache_upsert((void **)&ref, backend->refcache, scan) < 0)
+ 			goto parse_failed;
+ 		scan = eol + 1;
+diff --git a/src/libgit2/repository.c b/src/libgit2/repository.c
+index 9fed12cd7..cc42e62c4 100644
+--- a/src/libgit2/repository.c
++++ b/src/libgit2/repository.c
+@@ -1258,6 +1258,25 @@ int git_repository_discover(
+ 	return error;
+ }
+ 
++int git_repository_discover_ex(
++        git_buf *gitdir,
++        git_buf *workdir,
++        const char *start_path,
++        uint32_t flags,
++        const char *ceiling_dirs)
++{
++	struct repo_paths paths = { GIT_STR_INIT };
++	int error;
++
++	GIT_ASSERT_ARG(start_path);
++	if ((error = find_repo(&paths, start_path, ceiling_dirs, flags)) == 0 &&
++	    (error = git_buf_fromstr(gitdir, &paths.gitdir)) == 0)
++		error = git_buf_fromstr(workdir, &paths.workdir);
++
++	repo_paths_dispose(&paths);
++	return error;
++}
++
+ static int has_config_worktree(bool *out, git_config *cfg)
+ {
+ 	int worktreeconfig = 0, error;
+diff --git a/src/libgit2/repository.h b/src/libgit2/repository.h
+index fbf143894..5e9bc2eb7 100644
+--- a/src/libgit2/repository.h
++++ b/src/libgit2/repository.h
+@@ -172,7 +172,7 @@ struct git_repository {
+ 
+ GIT_INLINE(git_attr_cache *) git_repository_attr_cache(git_repository *repo)
+ {
+-	return repo->attrcache;
++	return git_atomic_load(repo->attrcache);
+ }
+ 
+ int git_repository_head_commit(git_commit **commit, git_repository *repo);
+diff --git a/src/libgit2/settings.c b/src/libgit2/settings.c
+index 7e7ff615a..daef1124e 100644
+--- a/src/libgit2/settings.c
++++ b/src/libgit2/settings.c
+@@ -23,6 +23,7 @@
+ #include "odb.h"
+ #include "rand.h"
+ #include "refs.h"
++#include "refdb.h"
+ #include "runtime.h"
+ #include "sysdir.h"
+ #include "thread.h"
+@@ -351,6 +352,18 @@ int git_libgit2_opts(int key, ...)
+ 		git_index__enforce_unsaved_safety = (va_arg(ap, int) != 0);
+ 		break;
+ 
++	case GIT_OPT_DISABLE_INDEX_CHECKSUM_VERIFICATION:
++		git_index__disable_checksum_verification = (va_arg(ap, int) != 0);
++		break;
++
++	case GIT_OPT_DISABLE_INDEX_FILEPATH_VALIDATION:
++		git_index__disable_filepath_validation = (va_arg(ap, int) != 0);
++		break;
++
++	case GIT_OPT_DISABLE_READNG_PACKED_TAGS:
++		git_refdb__disable_reading_packed_tags = (va_arg(ap, int) != 0);
++		break;
++
+ 	case GIT_OPT_SET_PACK_MAX_OBJECTS:
+ 		git_indexer__max_objects = va_arg(ap, size_t);
+ 		break;

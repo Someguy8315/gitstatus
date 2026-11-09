@@ -161,6 +161,8 @@ IndexStats Repo::GetIndexStats(const git_oid* head, git_config* cfg) {
     VERIFY(!git_attr_get(&attr, repo_, 0, "x", "x")) << GitError();
   }
 
+  // Sort on the request thread before parallel readers borrow immutable entries.
+  if (git_index_entrycount(git_index_)) git_index_get_byindex(git_index_, 0);
   UpdateShards();
   Store(error_, false);
   Store(unstaged_, {});
@@ -293,7 +295,7 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
     }
   };
 
-  const Str<> str(git_index_is_case_sensitive(git_index_));
+  const Str<> str(IsCaseSensitive(git_index_));
   auto shard = shards_.begin();
   for (auto p = paths.begin(); p != paths.end();) {
     opt.range_start = *p;
@@ -381,7 +383,7 @@ void Repo::StartStagedScan(const git_oid* head) {
 void Repo::UpdateShards() {
   constexpr size_t kEntriesPerShard = 512;
 
-  const Str<> str(git_index_is_case_sensitive(git_index_));
+  const Str<> str(IsCaseSensitive(git_index_));
   size_t index_size = git_index_entrycount(git_index_);
   ON_SCOPE_EXIT(&) {
     LOG(INFO) << "Splitting " << index_size << " object(s) into " << shards_.size() << " shard(s)";

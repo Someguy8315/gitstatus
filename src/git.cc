@@ -187,17 +187,17 @@ const char* LocalBranchName(const git_reference* ref) {
 }
 
 RemotePtr GetRemote(git_repository* repo, const git_reference* local) {
-  git_remote* remote;
-  git_buf symref = {};
-  if (git_branch_remote(&remote, &symref, repo, git_reference_name(local))) return nullptr;
+  git_remote* remote = nullptr;
+  git_buf remote_name = {};
+  git_reference* ref = nullptr;
   ON_SCOPE_EXIT(&) {
     git_remote_free(remote);
-    git_buf_free(&symref);
+    git_buf_dispose(&remote_name);
+    if (ref) git_reference_free(ref);
   };
-
-  git_reference* ref;
-  if (git_reference_lookup(&ref, repo, symref.ptr)) return nullptr;
-  ON_SCOPE_EXIT(&) { if (ref) git_reference_free(ref); };
+  if (git_branch_upstream(&ref, local) ||
+      git_branch_upstream_remote(&remote_name, repo, git_reference_name(local))) return nullptr;
+  if (std::strcmp(remote_name.ptr, ".") && git_remote_lookup(&remote, repo, remote_name.ptr)) return nullptr;
 
   const char* branch = nullptr;
   std::string name = remote ? git_remote_name(remote) : ".";
