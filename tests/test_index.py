@@ -144,6 +144,29 @@ class IndexRefreshTest(unittest.TestCase):
                             daemon.check(root, (1, 1, 0, 1))
 
 
+class ChangesTest(unittest.TestCase):
+    def test_many_changes_in_one_directory(self):
+        with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
+            root = Path(temporary)
+            init(root)
+            directory = root / "dir"
+            directory.mkdir()
+            for i in range(30):
+                (directory / f"{i:02}.txt").write_text(f"{i}\n")
+            git(root, "add", ".")
+            git(root, "commit", "-m", "base")
+
+            with Daemon(self) as daemon:
+                daemon.check(root, (0, 0, 0, 0))
+                for i in range(0, 30, 3):
+                    (directory / f"{i:02}.txt").write_text("changed\n")
+                for i in range(1, 30, 6):
+                    (directory / f"{i:02}.txt").unlink()
+                for i in range(7):
+                    (directory / f"new_{i}.txt").write_text("new\n")
+                daemon.check(root, (0, 15, 0, 7))
+
+
 class SubmoduleTest(unittest.TestCase):
     def test_head_changes(self):
         with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:

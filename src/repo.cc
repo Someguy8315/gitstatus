@@ -300,6 +300,10 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
     }
   };
 
+  // Candidates are diffed in small groups so that slow ones (submodules, files that need hashing)
+  // run in parallel even when they are clustered in a single shard.
+  constexpr size_t kMaxCandidatesPerDiff = 4;
+
   const Str<> str(git_index_is_case_sensitive(git_index_));
   auto shard = shards_.begin();
   for (auto p = paths.begin(); p != paths.end();) {
@@ -308,7 +312,8 @@ void Repo::StartDirtyScan(const std::vector<const char*>& paths) {
     opt.pathspec.strings = const_cast<char**>(&*p);
     opt.pathspec.count = 1;
     while (!shard->Contains(str, StringView(*p))) ++shard;
-    while (++p != paths.end() && shard->Contains(str, StringView(*p))) {
+    while (++p != paths.end() && opt.pathspec.count < kMaxCandidatesPerDiff &&
+           shard->Contains(str, StringView(*p))) {
       opt.range_end = *p;
       ++opt.pathspec.count;
     }
