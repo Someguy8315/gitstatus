@@ -110,6 +110,17 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   // Look for staged, unstaged and untracked. This is where most of the time is spent.
   if (req.diff) stats = repo->GetIndexStats(head_target, cfg);
 
+  // The number of commits in `ref..HEAD` (ahead) or `HEAD..ref` (behind).
+  auto Count = [&](const git_reference* ref, bool ahead) {
+    const git_oid* target = git_reference_target(ref);
+    if (head_target && target) {
+      return ahead ? repo->CountCommits(*target, *head_target)
+                   : repo->CountCommits(*head_target, *target);
+    }
+    const char* name = git_reference_name(ref);
+    return CountRange(repo->repo(), ahead ? name + "..HEAD"s : "HEAD.."s + name);
+  };
+
   // The number of files in the index.
   resp.Print(stats.index_size);
   // The number of staged changes. At most opts.max_num_staged.
@@ -122,11 +133,10 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   resp.Print(stats.num_untracked);
 
   if (remote && remote->ref) {
-    const char* ref = git_reference_name(remote->ref);
     // Number of commits we are ahead of upstream. Non-negative integer.
-    resp.Print(CountRange(repo->repo(), ref + "..HEAD"s));
+    resp.Print(Count(remote->ref, true));
     // Number of commits we are behind upstream. Non-negative integer.
-    resp.Print(CountRange(repo->repo(), "HEAD.."s + ref));
+    resp.Print(Count(remote->ref, false));
   } else {
     resp.Print("0");
     resp.Print("0");
@@ -156,11 +166,10 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   resp.Print(push_remote ? push_remote->url : "");
 
   if (push_remote && push_remote->ref) {
-    const char* ref = git_reference_name(push_remote->ref);
     // Number of commits we are ahead of push remote. Non-negative integer.
-    resp.Print(CountRange(repo->repo(), ref + "..HEAD"s));
+    resp.Print(Count(push_remote->ref, true));
     // Number of commits we are behind upstream. Non-negative integer.
-    resp.Print(CountRange(repo->repo(), "HEAD.."s + ref));
+    resp.Print(Count(push_remote->ref, false));
   } else {
     resp.Print("0");
     resp.Print("0");

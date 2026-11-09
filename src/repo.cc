@@ -512,4 +512,23 @@ std::future<std::string> Repo::GetTagName(const git_oid* target) {
   return res;
 }
 
+size_t Repo::CountCommits(const git_oid& from, const git_oid& to) {
+  // Deepening a shallow repository changes the counts of the same commits.
+  const bool shallow = git_repository_is_shallow(repo_) != 0;
+  if (!shallow) {
+    for (const CommitCount& c : commit_counts_) {
+      if (git_oid_equal(&c.from, &from) && git_oid_equal(&c.to, &to)) return c.count;
+    }
+  }
+  std::string range = git_oid_tostr_s(&from);
+  range += "..";
+  range += git_oid_tostr_s(&to);
+  const size_t count = CountRange(repo_, range);
+  if (!shallow) {
+    if (commit_counts_.size() == 4) commit_counts_.erase(commit_counts_.begin());
+    commit_counts_.push_back({from, to, count});
+  }
+  return count;
+}
+
 }  // namespace gitstatus

@@ -77,7 +77,17 @@ class Repo {
   // empty string. Target can be null, in which case the tag is empty.
   std::future<std::string> GetTagName(const git_oid* target);
 
+  // The number of commits reachable from `to` but not from `from`. Commits are immutable, so the
+  // count is reused while both ends stay the same, unless the repository is shallow.
+  size_t CountCommits(const git_oid& from, const git_oid& to);
+
  private:
+  struct CommitCount {
+    git_oid from;
+    git_oid to;
+    size_t count;
+  };
+
   struct Shard {
     bool Contains(Str<> str, StringView path) const;
     std::string start_s;
@@ -104,6 +114,8 @@ class Repo {
   std::vector<Shard> shards_;
   git_oid head_ = {};
   TagDb tag_db_;
+  // The most recent counts: ahead and behind of the upstream and the push remote.
+  std::vector<CommitCount> commit_counts_;
 
   std::unique_ptr<Index> index_;
 

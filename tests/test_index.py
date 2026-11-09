@@ -185,6 +185,42 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(daemon.counts(root), (0, 0, 0, 0))
 
 
+class UpstreamTest(unittest.TestCase):
+    def test_ahead_behind(self):
+        with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
+            upstream = Path(temporary) / "upstream"
+            root = Path(temporary) / "root"
+            upstream.mkdir()
+            init(upstream)
+            (upstream / "file.txt").write_text("base\n")
+            git(upstream, "add", ".")
+            git(upstream, "commit", "-m", "base")
+            git(Path(temporary), "clone", "-q", upstream.as_posix(), "root")
+            git(root, "config", "remote.pushDefault", "origin")
+
+            def commit(repo, message):
+                (repo / f"{message}.txt").write_text(f"{message}\n")
+                git(repo, "add", ".")
+                git(repo, "commit", "-m", message)
+
+            with Daemon(self) as daemon:
+                def check(ahead, behind):
+                    self.assertEqual(git(root, "rev-list", "--count", "@{u}..HEAD").strip(), str(ahead))
+                    self.assertEqual(git(root, "rev-list", "--count", "HEAD..@{u}").strip(), str(behind))
+                    fields = daemon.fields(root)
+                    self.assertEqual((fields[14], fields[15]), (str(ahead), str(behind)))
+                    self.assertEqual((fields[23], fields[24]), (str(ahead), str(behind)))
+
+                check(0, 0)
+                commit(root, "local")
+                check(1, 0)
+                commit(upstream, "remote")
+                git(root, "fetch", "-q")
+                check(1, 1)
+                git(root, "reset", "-q", "--hard", "@{u}")
+                check(0, 0)
+
+
 class SubmoduleTest(unittest.TestCase):
     def test_head_changes(self):
         with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
