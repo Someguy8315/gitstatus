@@ -4,12 +4,19 @@ This independent repository preserves the history of `romkatv/gitstatus`; it is
 not a GitHub fork. `upstream` points to that project and `origin` points to
 `Someguy8315/gitstatus`.
 
-`build.info` pins the official **libgit2 1.9.7** release archive and its SHA-256.
-This was the latest stable release when checked on 2026-11-09. The previous
-dependency was `romkatv/libgit2` at `2ecf33948a4df9ef45a66c68b8ef24a5e60eaac6`,
-based on libgit2 1.1.0. Its surviving changes now live in `deps/libgit2.patch`,
-not in a second remotely maintained library fork. The build checks the archive
-checksum, checks patch applicability, and applies the patch before compiling.
+`build.info` pins the **`1.9.7-gitstatus`** tag archive from
+[Someguy8315/libgit2](https://github.com/Someguy8315/libgit2/tree/1.9.7-gitstatus)
+and its SHA-256. That repository's `gitstatus` branch contains the read-only
+gitstatusd extensions as ordinary commits on top of upstream **libgit2 1.9.7**,
+the latest stable release when checked on 2026-11-09. The build verifies the
+archive checksum and compiles it directly: there is no local patch file or
+submodule. The tag belongs to the libgit2 repository, not this one.
+
+The original dependency was `romkatv/libgit2` at
+`2ecf33948a4df9ef45a66c68b8ef24a5e60eaac6`, based on libgit2 1.1.0.
+
+For future upgrades, update the libgit2 branch, publish a new tag without moving
+an existing one, and update the tag and archive checksum in `build.info`.
 
 ## Build and test
 
@@ -22,8 +29,8 @@ Build prerequisites: a C/C++ toolchain, CMake, Make, Git, tar, wget, and a
 SHA-256 utility. The tests additionally require Node.js and Git. They use only
 Node's standard library. `TMPDIR` can select a scratch directory for both steps.
 
-The executable is `usrbin/gitstatusd`. It remains ignored by Git; source and
-patches, rather than a machine-specific binary, are committed. The daemon's
+The executable is `usrbin/gitstatusd`. It remains ignored by Git; source changes,
+rather than a machine-specific binary, are committed. The daemon's
 protocol version remains `v1.5.5`. No installer, shell configuration, or p10k
 configuration needs to be changed to build or test it.
 

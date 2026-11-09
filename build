@@ -323,7 +323,7 @@ if [ ! -e "$libgit2_tarball" ]; then
         exit 1
       fi
     fi
-    libgit2_url=https://github.com/libgit2/libgit2/archive/refs/tags/v"$libgit2_version".tar.gz
+    libgit2_url=https://github.com/Someguy8315/libgit2/archive/refs/tags/"$libgit2_version".tar.gz
     if ! >"$libgit2_tmp" command wget --no-config -qO- -- "$libgit2_url" &&
        ! >"$libgit2_tmp" command wget             -qO- -- "$libgit2_url"; then
       set -x
@@ -377,8 +377,6 @@ fi
 cd -- "$workdir"
 command tar -xzf "$libgit2_tarball"
 command mv -- libgit2-"$libgit2_version" libgit2
-command git -C libgit2 apply --check "$outdir"/deps/libgit2.patch
-command git -C libgit2 apply "$outdir"/deps/libgit2.patch
 command mkdir libgit2/build
 cd libgit2/build
 

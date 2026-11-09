@@ -1,7 +1,7 @@
 # gitstatus
 
 This independent copy builds gitstatusd against **libgit2 1.9.7**, with the remaining
-gitstatusd extensions maintained in [`deps/libgit2.patch`](deps/libgit2.patch).
+gitstatusd extensions committed in [Someguy8315/libgit2](https://github.com/Someguy8315/libgit2/tree/1.9.7-gitstatus).
 See [dependency maintenance and testing](docs/libgit2.md) for the patch audit,
 build instructions, and regression tests. Building does not change your shell or p10k configuration.
 
@@ -469,7 +469,7 @@ Once the difference between the index and the workdir is found, we have a list o
 files that may be unstaged or untracked. To make the final judgement, these files need to be checked
 against `.gitignore` rules and a few other things.
 
-This copy uses libgit2 1.9.7 with [local gitstatusd patches](docs/libgit2.md) for this step.
+This copy uses libgit2 1.9.7 with [gitstatusd extensions](docs/libgit2.md) for this step.
 The historical benchmarks used the original [patched libgit2](https://github.com/romkatv/libgit2)
 fork, not the current dependency. That fork performed more than twice as fast as the original
 without changes in user code. It also added API extensions for multi-threaded scans: when
