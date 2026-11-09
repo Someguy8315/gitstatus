@@ -1,5 +1,10 @@
 # gitstatus
 
+This independent copy builds gitstatusd against **libgit2 1.9.7**, with the remaining
+gitstatusd extensions maintained in [`deps/libgit2.patch`](deps/libgit2.patch).
+See [dependency maintenance and testing](docs/libgit2.md) for the patch audit,
+build instructions, and regression tests. Building does not change your shell or p10k configuration.
+
 - **THE PROJECT HAS VERY LIMITED SUPPORT**
 - **NO NEW FEATURES ARE IN THE WORKS**
 - **MOST BUGS WILL GO UNFIXED**
@@ -464,13 +469,12 @@ Once the difference between the index and the workdir is found, we have a list o
 files that may be unstaged or untracked. To make the final judgement, these files need to be checked
 against `.gitignore` rules and a few other things.
 
-gitstatusd uses [patched libgit2](https://github.com/romkatv/libgit2) for this step. This fork
-adds several optimizations that make libgit2 faster. The patched libgit2 performs more than twice
-as fast in the benchmark as the original even without changes in the user code (that is, in the
-code that uses the libgit2 APIs). The fork also adds several API extensions, most notable of which
-is the support for multi-threaded scans. If `lg2 status` is modified to take advantage of these
-extensions, it outperforms the original libgit2 by a factor of 18. Lastly, the fork fixes a score of
-bugs, most of which become apparent only when using libgit2 from multiple threads.
+This copy uses libgit2 1.9.7 with [local gitstatusd patches](docs/libgit2.md) for this step.
+The historical benchmarks used the original [patched libgit2](https://github.com/romkatv/libgit2)
+fork, not the current dependency. That fork performed more than twice as fast as the original
+without changes in user code. It also added API extensions for multi-threaded scans: when
+`lg2 status` used those extensions, it outperformed the original libgit2 by a factor of 18.
+The original fork also fixed bugs that became apparent when using libgit2 from multiple threads.
 
 _WARNING: Changes to libgit2 are extensive but the testing they underwent isn't. It is
 **not recommended** to use the patched libgit2 in production._
