@@ -53,11 +53,11 @@ def rmtree(path):
 
 
 class Daemon:
-    def __init__(self, test):
+    def __init__(self, test, flags=("-U", "-W", "-D")):
         self.test = test
         self.process = subprocess.Popen(
             [str(BINARY), "-s", "-1", "-u", "-1", "-c", "-1", "-d", "-1",
-             "-t", "8", "-v", "ERROR", "-U", "-W", "-D"],
+             "-t", "8", "-v", "ERROR", *flags],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
         )
@@ -165,6 +165,24 @@ class ChangesTest(unittest.TestCase):
                 for i in range(7):
                     (directory / f"new_{i}.txt").write_text("new\n")
                 daemon.check(root, (0, 15, 0, 7))
+
+
+class ConfigTest(unittest.TestCase):
+    def test_symlinked_config_changes(self):
+        with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir()
+            init(root)
+            (root / "untracked.txt").write_text("untracked\n")
+            config = Path(temporary) / "config"
+            shutil.move(root / ".git" / "config", config)
+            (root / ".git" / "config").symlink_to(config)
+
+            with Daemon(self, flags=()) as daemon:
+                self.assertEqual(daemon.counts(root), (0, 0, 0, 1))
+                git(root, "config", "status.showUntrackedFiles", "no")
+                self.assertTrue((root / ".git" / "config").is_symlink())
+                self.assertEqual(daemon.counts(root), (0, 0, 0, 0))
 
 
 class SubmoduleTest(unittest.TestCase):
