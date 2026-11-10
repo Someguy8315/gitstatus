@@ -51,9 +51,9 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
 
   ResponseWriter resp(req.id);
 
-  // Check config files for changes once per request rather than on every lookup.
-  static int config_epoch = 0;
-  git_libgit2_opts(GIT_OPT_SET_CONFIG_REFRESH_EPOCH, ++config_epoch);
+  // Read config files and the HEAD tree for submodules once per request, not on every lookup.
+  static int refresh_epoch = 0;
+  git_libgit2_opts(GIT_OPT_SET_REFRESH_EPOCH, ++refresh_epoch);
 
   Repo* repo = cache.Open(req.dir, req.from_dotgit);
   if (!repo) return;
