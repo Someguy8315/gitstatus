@@ -50,6 +50,11 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   ON_SCOPE_EXIT(&) { timer.Report("request"); };
 
   ResponseWriter resp(req.id);
+  // Finish background work and release Windows packfiles before the client can run Git again.
+  bool success = false;
+  ON_SCOPE_EXIT(&) {
+    if (success) resp.Dump("with git status");
+  };
 
   // Read config files and the HEAD tree for submodules once per request, not on every lookup.
   static int refresh_epoch = 0;
@@ -57,6 +62,9 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
 
   Repo* repo = cache.Open(req.dir, req.from_dotgit);
   if (!repo) return;
+#ifdef _WIN32
+  ON_SCOPE_EXIT(&) { repo->ReleaseObjectDatabase(); };
+#endif
 
   git_config* cfg;
   VERIFY(!git_repository_config_snapshot(&cfg, repo->repo())) << GitError();
@@ -189,7 +197,7 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   resp.Print(msg.encoding);
   resp.Print(msg.summary);
 
-  resp.Dump("with git status");
+  success = true;
 }
 
 int GitStatus(int argc, char** argv) {

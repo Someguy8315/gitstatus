@@ -20,6 +20,10 @@
 > (`index.skipHash`, also enabled by `feature.manyFiles`) are compared by content on each daemon
 > query so rebases and other index replacements cannot leave stale status. Other platforms still
 > use `./build`, which compiles the same submodule.
+> On Windows, each query releases object databases and their packfile handles/mappings before
+> replying, without discarding the index and directory caches. Otherwise an idle daemon prevents
+> fetch/repack from deleting old packs. Linux keeps these resources cached: unlinking open or
+> mapped files is allowed there, and existing readers can continue using the old inode.
 >
 > After building, run `python tests/test_index.py` to check a persistent daemon as repositories
 > change: rebases with and without index checksums, submodules, upstreams and symlinked configs.

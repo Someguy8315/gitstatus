@@ -17,6 +17,10 @@
 
 #include "repo.h"
 
+#ifdef _WIN32
+#include <git2/sys/repository.h>
+#endif
+
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -517,6 +521,13 @@ void Repo::RunAsync(std::function<void()> f) {
     throw;
   }
 }
+
+#ifdef _WIN32
+void Repo::ReleaseObjectDatabase() {
+  Wait();
+  git_repository__release_odb(repo_);
+}
+#endif
 
 void Repo::Wait() {
   std::unique_lock<std::mutex> lock(mutex_);

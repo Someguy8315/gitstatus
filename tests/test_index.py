@@ -1,4 +1,4 @@
-"""Exercise a persistent native Windows daemon as a repository changes between queries."""
+"""Exercise a persistent daemon as a repository changes between queries."""
 
 import os
 from pathlib import Path
@@ -9,7 +9,9 @@ import tempfile
 import unittest
 
 
-BINARY = Path(__file__).resolve().parents[1] / "obj" / "gitstatusd.exe"
+BINARY = Path(__file__).resolve().parents[1] / (
+    "obj/gitstatusd.exe" if os.name == "nt" else "usrbin/gitstatusd"
+)
 
 
 def git(cwd, *args, input=None):
@@ -144,6 +146,30 @@ class IndexRefreshTest(unittest.TestCase):
                             (directory / "new_1.txt").write_text("unstaged\n")
                             (directory / "untracked.txt").write_text("untracked\n")
                             daemon.check(root, (1, 1, 0, 1))
+
+
+class PackRefreshTest(unittest.TestCase):
+    def test_repack_with_idle_daemon(self):
+        with tempfile.TemporaryDirectory(prefix="gitstatusd-") as temporary:
+            root = Path(temporary)
+            init(root)
+            (root / "file.txt").write_text("base\n")
+            git(root, "add", ".")
+            git(root, "commit", "-m", "base")
+            git(root, "repack", "-ad")
+            pack_dir = root / ".git" / "objects" / "pack"
+            old_packs = list(pack_dir.glob("*.pack")) + list(pack_dir.glob("*.idx"))
+            self.assertEqual(len(old_packs), 2)
+
+            with Daemon(self) as daemon:
+                daemon.check(root, (0, 0, 0, 0))
+                (root / "file.txt").write_text("next\n")
+                git(root, "commit", "-am", "next")
+                output = git(root, "repack", "-ad", input=b"n\n" * 20)
+                self.assertFalse([p.name for p in old_packs if p.exists()], output)
+                daemon.check(root, (0, 0, 0, 0))
+                (root / "file.txt").write_text("changed\n")
+                daemon.check(root, (0, 1, 0, 0))
 
 
 class ChangesTest(unittest.TestCase):

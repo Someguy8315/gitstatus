@@ -82,6 +82,11 @@ class Repo {
   // count is reused while both ends stay the same, unless the repository is shallow.
   size_t CountCommits(const git_oid& from, const git_oid& to);
 
+#ifdef _WIN32
+  // Wait for scans before releasing packfile handles and mappings between requests.
+  void ReleaseObjectDatabase();
+#endif
+
  private:
   struct CommitCount {
     git_oid from;
