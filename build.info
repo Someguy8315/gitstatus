@@ -3,7 +3,7 @@
 #
 # This value is also read by shell bindings (indirectly, through
 # ./install) when using GITSTATUS_DAEMON or usrbin/gitstatusd.
-gitstatus_version="v1.6.1"
+gitstatus_version="v1.6.2"
 
 # libgit2 is a build time dependency of gitstatusd. ./build and the Windows
 # CMake build compile it from the deps/libgit2 submodule:
