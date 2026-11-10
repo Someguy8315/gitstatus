@@ -23,6 +23,8 @@
 >
 > After building, run `python tests/test_index.py` to check a persistent daemon as repositories
 > change: rebases with and without index checksums, submodules, upstreams and symlinked configs.
+> `node --test tests/gitstatus.test.js` checks the protocol responses against many repository
+> states (ignore rules, intent-to-add, worktrees, shallow clones and more).
 
 - **THE PROJECT HAS VERY LIMITED SUPPORT**
 - **NO NEW FEATURES ARE IN THE WORKS**
