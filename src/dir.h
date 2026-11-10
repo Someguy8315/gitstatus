@@ -62,6 +62,9 @@ const Stat& EntryStat(const char* entry);
 // Like lstat(), except that a symlink reports as the regular file or directory it is marked as.
 bool LStat(const char* path, Stat& st);
 
+// Like fstat() for a Win32 file handle; comparable with LStat() of the same file.
+bool FStat(void* handle, Stat& st);
+
 #else
 
 // On error, leaves entries unchanged and returns false. Does not throw.

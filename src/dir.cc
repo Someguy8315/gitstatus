@@ -175,6 +175,15 @@ bool LStat(const char* path, Stat& st) {
   return true;
 }
 
+bool FStat(void* handle, Stat& st) {
+  BY_HANDLE_FILE_INFORMATION info;
+  if (!GetFileInformationByHandle(handle, &info)) return false;
+  st = ToStat(info.dwFileAttributes, 0,
+              Int64(info.ftLastWriteTime.dwHighDateTime, info.ftLastWriteTime.dwLowDateTime),
+              Int64(info.nFileSizeHigh, info.nFileSizeLow));
+  return true;
+}
+
 // The linux-specific implementation is about 20% faster than the generic (posix) implementation.
 #elif defined(__linux__)
 

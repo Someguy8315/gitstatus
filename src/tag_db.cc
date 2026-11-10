@@ -212,7 +212,7 @@ void TagDb::UpdatePack() {
       DWORD n;
       VERIFY(ReadFile(h, &pack_[0], static_cast<DWORD>(st.st_size + 1), &n, nullptr))
           << GetLastError();
-      VERIFY(LStat(pack_path.c_str(), pack_stat_));
+      VERIFY(FStat(h, pack_stat_)) << GetLastError();
 #else
       int fd = open(pack_path.c_str(), O_RDONLY | O_CLOEXEC);
       VERIFY(fd >= 0);
