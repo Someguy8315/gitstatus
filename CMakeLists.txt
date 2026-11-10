@@ -7,6 +7,7 @@ if(NOT WIN32)
   message(FATAL_ERROR "This CMake build is Windows-only; use ./build on this platform.")
 endif()
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/build.info")
 file(STRINGS build.info gitstatus_version REGEX "^gitstatus_version=")
 string(REGEX REPLACE "^gitstatus_version=\"(.*)\"$" "\\1" gitstatus_version "${gitstatus_version}")
 
