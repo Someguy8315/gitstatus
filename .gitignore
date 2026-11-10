@@ -1,6 +1,5 @@
 *.zwc
 /core
-/deps/libgit2-*.tar.gz
 /locks
 /logs
 /obj

@@ -50,13 +50,17 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   ON_SCOPE_EXIT(&) { timer.Report("request"); };
 
   ResponseWriter resp(req.id);
+
+  // Check config files for changes once per request rather than on every lookup.
+  static int config_epoch = 0;
+  git_libgit2_opts(GIT_OPT_SET_CONFIG_REFRESH_EPOCH, ++config_epoch);
+
   Repo* repo = cache.Open(req.dir, req.from_dotgit);
   if (!repo) return;
 
   git_config* cfg;
-  VERIFY(!git_repository_config(&cfg, repo->repo())) << GitError();
+  VERIFY(!git_repository_config_snapshot(&cfg, repo->repo())) << GitError();
   ON_SCOPE_EXIT(=) { git_config_free(cfg); };
-  VERIFY(!git_config_refresh(cfg)) << GitError();
 
   // Symbolic reference if and only if the repo is empty.
   git_reference* head = Head(repo->repo());
@@ -197,11 +201,11 @@ int GitStatus(int argc, char** argv) {
   RepoCache cache(opts);
 
   InitGlobalThreadPool(opts.num_threads);
+  VERIFY(git_libgit2_init() > 0) << GitError();
   git_libgit2_opts(GIT_OPT_ENABLE_STRICT_HASH_VERIFICATION, 0);
   git_libgit2_opts(GIT_OPT_DISABLE_INDEX_CHECKSUM_VERIFICATION, 1);
   git_libgit2_opts(GIT_OPT_DISABLE_INDEX_FILEPATH_VALIDATION, 1);
   git_libgit2_opts(GIT_OPT_DISABLE_READNG_PACKED_TAGS, 1);
-  git_libgit2_init();
 
   while (true) {
     try {

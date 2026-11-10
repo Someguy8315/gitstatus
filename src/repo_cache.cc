@@ -45,7 +45,7 @@ void GitDirs(const char* dir, bool from_dotgit, std::string& gitdir, std::string
     git_buf_free(&workdir_buf);
   };
   int flags = from_dotgit ? GIT_REPOSITORY_OPEN_NO_SEARCH | GIT_REPOSITORY_OPEN_NO_DOTGIT : 0;
-  switch (git_repository_discover_ex(&gitdir_buf, &workdir_buf, NULL, NULL, dir, flags, nullptr)) {
+  switch (git_repository_discover_ex(&gitdir_buf, &workdir_buf, dir, flags, nullptr)) {
     case 0:
       gitdir.assign(gitdir_buf.ptr, gitdir_buf.size);
       workdir.assign(workdir_buf.ptr, workdir_buf.size);

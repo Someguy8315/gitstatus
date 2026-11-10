@@ -26,6 +26,10 @@
 
 namespace gitstatus {
 
+inline bool IsCaseSensitive(const git_index* index) {
+  return !(git_index_caps(index) & GIT_INDEX_CAPABILITY_IGNORE_CASE);
+}
+
 // Not null.
 const char* GitError();
 

@@ -13,10 +13,13 @@
 > cmake --build obj
 > ```
 >
-> `deps/libgit2` is [romkatv/libgit2](https://github.com/romkatv/libgit2) at the tag in
-> `build.info`, with Windows build fixes. Indexes with an omitted checksum (`index.skipHash`,
-> also enabled by `feature.manyFiles`) are compared by content on each daemon query so rebases and
-> other index replacements cannot leave stale status. Other platforms still use `./build`.
+> `deps/libgit2` is a submodule:
+> [Someguy8315/libgit2](https://github.com/Someguy8315/libgit2), branch
+> `master`, which is libgit2 1.9.7 with the gitstatusd extensions as separate commits (clone with
+> `--recurse-submodules` or run `git submodule update --init`). Indexes with an omitted checksum
+> (`index.skipHash`, also enabled by `feature.manyFiles`) are compared by content on each daemon
+> query so rebases and other index replacements cannot leave stale status. Other platforms still
+> use `./build`, which compiles the same submodule.
 >
 > After building, run `python tests/test_index.py` to check a persistent daemon as repositories
 > change: rebases with and without index checksums, submodules, upstreams and symlinked configs.

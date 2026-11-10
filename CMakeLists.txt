@@ -1,5 +1,5 @@
-# Native Windows build of gitstatusd; see README.md. Requires clang-cl: the libgit2 fork uses GCC
-# atomic builtins. Other platforms use ./build.
+# Native Windows build of gitstatusd; see README.md. Requires clang-cl: gitstatusd uses GNU C++
+# extensions. Other platforms use ./build.
 cmake_minimum_required(VERSION 3.15)
 project(gitstatusd C CXX)
 
@@ -11,15 +11,17 @@ file(STRINGS build.info gitstatus_version REGEX "^gitstatus_version=")
 string(REGEX REPLACE "^gitstatus_version=\"(.*)\"$" "\\1" gitstatus_version "${gitstatus_version}")
 
 # The same libgit2 configuration as ./build, minus the network transports that gitstatusd never uses.
-foreach(option BUILD_SHARED_LIBS BUILD_CLAR USE_SSH USE_HTTPS USE_GSSAPI USE_NTLMCLIENT WINHTTP)
+foreach(option BUILD_SHARED_LIBS BUILD_TESTS BUILD_CLI USE_SSH USE_GSSAPI USE_NTLMCLIENT)
   set(${option} OFF CACHE BOOL "" FORCE)
 endforeach()
-foreach(option ZERO_NSEC THREADSAFE USE_BUNDLED_ZLIB STATIC_CRT)
+foreach(option USE_THREADS USE_BUNDLED_ZLIB STATIC_CRT)
   set(${option} ON CACHE BOOL "" FORCE)
 endforeach()
+set(USE_HTTPS OFF CACHE STRING "" FORCE)
 set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
 set(REGEX_BACKEND builtin CACHE STRING "" FORCE)
 set(USE_HTTP_PARSER builtin CACHE STRING "" FORCE)
+add_compile_definitions(GIT_ZERO_NSEC)
 add_subdirectory(deps/libgit2 EXCLUDE_FROM_ALL)
 
 file(GLOB sources CONFIGURE_DEPENDS src/*.cc)
@@ -38,4 +40,4 @@ target_compile_options(gitstatusd PRIVATE
   -Wno-c99-designator -Wno-gnu-conditional-omitted-operand -Wno-gnu-zero-variadic-macro-arguments
   -Wno-variadic-macros)
 target_include_directories(gitstatusd PRIVATE deps/libgit2/include)
-target_link_libraries(gitstatusd PRIVATE git2)
+target_link_libraries(gitstatusd PRIVATE libgit2package)

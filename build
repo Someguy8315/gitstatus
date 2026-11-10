@@ -47,9 +47,8 @@ Options:
   -s        install whatever software is necessary for build to
             succeed; on some operating systems this option is not
             supported; on others it can have partial effect
-  -w        automatically download tarballs for dependencies if they
-            do not already exist in ./deps; dependencies are described
-            in ./build.info
+  -w        accepted for compatibility; libgit2 is built from the
+            deps/libgit2 submodule
 END
 )"
 
@@ -74,14 +73,13 @@ if [ "$(narg $workdir)" != 1 -o -z "${workdir##*:*}" -o -z "${workdir##*=*}" ]; 
 fi
 
 appname=gitstatusd
-libgit2_tmp="$outdir"/deps/"$appname".libgit2.tmp
 
 cleanup() {
   trap - INT QUIT TERM ILL PIPE
   cd /
-  if ! command rm -rf -- "$workdir" "$outdir"/usrbin/"$appname".tmp "$libgit2_tmp"; then
+  if ! command rm -rf -- "$workdir" "$outdir"/usrbin/"$appname".tmp; then
     command sleep 5
-    command rm -rf -- "$workdir" "$outdir"/usrbin/"$appname".tmp "$libgit2_tmp"
+    command rm -rf -- "$workdir" "$outdir"/usrbin/"$appname".tmp
   fi
 }
 trap cleanup INT QUIT TERM ILL PIPE
@@ -223,7 +221,7 @@ if [ "$gitstatus_cpu" = x86-64 ]; then
 fi
 
 libgit2_cmake_flags=
-libgit2_cflags="${CFLAGS-} $cflags -O3 -DNDEBUG"
+libgit2_cflags="${CFLAGS-} $cflags -O3 -DNDEBUG -DGIT_ZERO_NSEC"
 
 gitstatus_cxx=g++
 gitstatus_cxxflags="${CXXFLAGS-} $cflags -I${workdir}/libgit2/include -DGITSTATUS_ZERO_NSEC -D_GNU_SOURCE -D_GLIBCXX_ASSERTIONS"
@@ -290,7 +288,7 @@ case "$gitstatus_kernel" in
   ;;
 esac
 
-for cmd in cat cmake git ld ln mkdir rm strip tar "$gitstatus_make"; do
+for cmd in cat cmake cp git ld ln mkdir rm strip "$gitstatus_make"; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     if [ -n "$gitstatus_install_tools" ]; then
       >&2 echo "[internal error] $cmd not found"
@@ -302,94 +300,27 @@ for cmd in cat cmake git ld ln mkdir rm strip tar "$gitstatus_make"; do
   fi
 done
 
-. "$outdir"/build.info
-if [ -z "${libgit2_version:-}" ]; then
-  >&2 echo "[internal error] libgit2_version not set"
-  exit 1
-fi
-if [ -z "${libgit2_sha256:-}" ]; then
-  >&2 echo "[internal error] libgit2_sha256 not set"
-  exit 1
-fi
-libgit2_tarball="$outdir"/deps/libgit2-"$libgit2_version".tar.gz
-if [ ! -e "$libgit2_tarball" ]; then
-  if [ -n "$gitstatus_download_deps" ]; then
-    if ! command -v wget >/dev/null 2>&1; then
-      if [ -n "$gitstatus_install_tools" ]; then
-        >&2 echo "[internal error] wget not found"
-        exit 1
-      else
-        >&2 echo "[error] command not found: wget"
-        exit 1
-      fi
-    fi
-    libgit2_url=https://github.com/romkatv/libgit2/archive/"$libgit2_version".tar.gz
-    if ! >"$libgit2_tmp" command wget --no-config -qO- -- "$libgit2_url" &&
-       ! >"$libgit2_tmp" command wget             -qO- -- "$libgit2_url"; then
-      set -x
-      >&2 command which wget
-      >&2 command ls -lAd -- "$(command which wget)"
-      >&2 command ls -lAd -- "$outdir"
-      >&2 command ls -lA -- "$outdir"
-      >&2 command ls -lAd -- "$outdir"/deps
-      >&2 command ls -lA -- "$outdir"/deps
-      set +x
-      exit 1
-    fi
-    command mv -f -- "$libgit2_tmp" "$libgit2_tarball"
-  else
-    >&2 echo "[error] file not found: deps/libgit2-"$libgit2_version".tar.gz"
-    exit 1
-  fi
-fi
-
-libgit2_actual_sha256=
-if command -v shasum >/dev/null 2>/dev/null; then
-  libgit2_actual_sha256="$(command shasum -b -a 256 -- "$libgit2_tarball")"
-  libgit2_actual_sha256="${libgit2_actual_sha256%% *}"
-elif command -v sha256sum >/dev/null 2>/dev/null; then
-  libgit2_actual_sha256="$(command sha256sum -b -- "$libgit2_tarball")"
-  libgit2_actual_sha256="${libgit2_actual_sha256%% *}"
-elif command -v sha256 >/dev/null 2>/dev/null; then
-  libgit2_actual_sha256="$(command sha256 -- "$libgit2_tarball" </dev/null)"
-  # Ignore sha256 output if it's from hashalot. It's incompatible.
-  if [ ${#libgit2_actual_sha256} -lt 64 ]; then
-    libgit2_actual_sha256=
-  else
-    libgit2_actual_sha256="${libgit2_actual_sha256##* }"
-  fi
-fi
-
-if [ -z "$libgit2_actual_sha256" ]; then
-  >&2 echo "[error] command not found: shasum or sha256sum"
-  exit 1
-fi
-
-if [ "$libgit2_actual_sha256" != "$libgit2_sha256" ]; then
-  >&2 echo "[error] sha256 mismatch"
-  >&2 echo ""
-  >&2 echo "  file    : deps/libgit2-$libgit2_version.tar.gz"
-  >&2 echo "  expected: $libgit2_sha256"
-  >&2 echo "  actual  : $libgit2_actual_sha256"
+if [ ! -e "$outdir"/deps/libgit2/CMakeLists.txt ]; then
+  >&2 echo "[error] deps/libgit2 is empty; run: git submodule update --init"
   exit 1
 fi
 
 cd -- "$workdir"
-command tar -xzf "$libgit2_tarball"
-command mv -- libgit2-"$libgit2_version" libgit2
+command cp -R -- "$outdir"/deps/libgit2 libgit2
 command mkdir libgit2/build
 cd libgit2/build
 
 CFLAGS="$libgit2_cflags" command cmake \
   -DCMAKE_BUILD_TYPE=None              \
-  -DZERO_NSEC=ON                       \
-  -DTHREADSAFE=ON                      \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5   \
+  -DUSE_THREADS=ON                     \
   -DUSE_BUNDLED_ZLIB=ON                \
   -DREGEX_BACKEND=builtin              \
   -DUSE_HTTP_PARSER=builtin            \
   -DUSE_SSH=OFF                        \
   -DUSE_HTTPS=OFF                      \
-  -DBUILD_CLAR=OFF                     \
+  -DBUILD_TESTS=OFF                    \
+  -DBUILD_CLI=OFF                      \
   -DUSE_GSSAPI=OFF                     \
   -DUSE_NTLMCLIENT=OFF                 \
   -DBUILD_SHARED_LIBS=OFF              \
